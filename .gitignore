@@ -1,0 +1,39 @@
+Python cache e compilati
+
+pycache/
+*.pyc
+*.pyo
+*.pyd
+
+Ambienti virtuali
+
+venv/
+env/
+.env
+.venv
+
+File di output media (per non caricarli su GitHub per sbaglio)
+
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.ogg
+
+File di output trascrizioni (opzionale, se vuoi ignorare i risultati dei test)
+
+*.srt
+
+*.vtt
+
+*.txt
+
+Log e OS
+
+*.log
+.DS_Store
+Thumbs.db
