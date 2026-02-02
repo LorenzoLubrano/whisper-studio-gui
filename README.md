@@ -37,6 +37,7 @@ FFmpeg installato e aggiunto al PATH di sistema.
 Clona il repository:
 
 git clone [https://github.com/TUO_NOME/whisper-studio-gui.git](https://github.com/TUO_NOME/whisper-studio-gui.git)
+
 cd whisper-studio-gui
 
 
