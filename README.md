@@ -43,5 +43,5 @@ Se preferisci eseguire il programma dal codice sorgente o vuoi contribuire al pr
 ### 🚀 Installazione
 1. Clona il repository:
 ```bash
-git clone [https://github.com/TUO_NOME/whisper-studio-gui.git](https://github.com/TUO_NOME/whisper-studio-gui.git)
+git clone [https://github.com/LorenzoLubrano/whisper-studio-gui.git](https://github.com/LorenzoLubrano/whisper-studio-gui.git)
 cd whisper-studio-gui
