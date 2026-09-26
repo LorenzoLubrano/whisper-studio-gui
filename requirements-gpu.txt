@@ -1,0 +1,4 @@
+# Facoltativo, solo per schede NVIDIA: librerie CUDA 12 (cuBLAS) per usare la GPU.
+# Circa 700 MB. Senza, il programma funziona lo stesso sulla CPU.
+# Le schede RTX serie 50 (Blackwell) richiedono cuBLAS 12.8 o successivo.
+nvidia-cublas-cu12>=12.8,<13

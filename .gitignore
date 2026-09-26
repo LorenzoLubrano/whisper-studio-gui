@@ -1,19 +1,21 @@
-Python cache e compilati
+# Cache e compilati Python
+__pycache__/
+*.py[cod]
 
-pycache/
-*.pyc
-*.pyo
-*.pyd
-
-Ambienti virtuali
-
+# Ambienti virtuali
 venv/
 env/
+.venv/
 .env
-.venv
 
-File di output media (per non caricarli su GitHub per sbaglio)
+# Build dell'eseguibile (PyInstaller)
+build/
+dist/
 
+# Test
+.pytest_cache/
+
+# File multimediali (per non caricarli su GitHub per sbaglio)
 *.mp4
 *.mkv
 *.avi
@@ -24,16 +26,13 @@ File di output media (per non caricarli su GitHub per sbaglio)
 *.m4a
 *.ogg
 
-File di output trascrizioni (opzionale, se vuoi ignorare i risultati dei test)
-
+# Trascrizioni prodotte durante le prove
 *.srt
-
 *.vtt
-
 *.txt
+!requirements*.txt
 
-Log e OS
-
+# Log e sistema operativo
 *.log
 .DS_Store
 Thumbs.db

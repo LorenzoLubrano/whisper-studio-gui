@@ -1,7 +1,7 @@
 # 🎙️ Whisper Studio
 
 ![Windows](https://img.shields.io/badge/Windows-EXE_Available-blue.svg)
-![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![Faster-Whisper](https://img.shields.io/badge/AI-Faster_Whisper-purple.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
@@ -10,38 +10,66 @@
 ---
 
 ## 📥 Download Rapido (Per utenti Windows)
-Vuoi usare l'applicazione subito senza installare Python o configurare l'ambiente di sviluppo? 
-Puoi scaricare la versione eseguibile pronta all'uso!
+Vuoi usare l'applicazione subito senza installare Python?
 
 1. Vai nella sezione **Releases** di questo repository (nel menu a destra).
-2. Scarica l'archivio contenente l'eseguibile (es. `WhisperStudio.exe`).
+2. Scarica `WhisperStudio.exe` dall'ultima versione (circa 100 MB).
 3. Fai doppio clic per avviare il programma.
-*(Nota: Assicurati di avere [FFmpeg](https://ffmpeg.org/) installato sul tuo sistema e aggiunto al PATH, in quanto è necessario al motore interno per l'elaborazione dei file multimediali).*
+
+Note:
+* **FFmpeg non serve**: l'audio dei file viene letto direttamente dal programma.
+* **Primo utilizzo di un modello**: viene scaricato da Internet una sola volta (tiny ≈ 75 MB, small ≈ 480 MB, medium ≈ 1,5 GB, large-v3 ≈ 3 GB). Da quel momento funziona anche offline.
+* Windows può mostrare l'avviso di SmartScreen perché l'eseguibile non è firmato: *Ulteriori informazioni → Esegui comunque*.
+
+### ⚡ GPU NVIDIA (facoltativa)
+Con **Dispositivo: Automatico** il programma usa la GPU NVIDIA quando trova le librerie CUDA 12 (cuBLAS); altrimenti usa la CPU e lo scrive in basso a sinistra (es. *«CPU (GPU NVIDIA trovata, ma mancano le librerie CUDA 12 cuBLAS)»*). Per attivare la GPU basta una di queste:
+* installare il [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) 12.8 o successivo;
+* copiare `cublas64_12.dll` e `cublasLt64_12.dll` nella stessa cartella di `WhisperStudio.exe` (si trovano nel pacchetto pip `nvidia-cublas-cu12`, cartella `nvidia/cublas/bin`).
+
+Le schede RTX serie 50 richiedono cuBLAS 12.8 o successivo. Se la GPU dà errore durante il lavoro, in modalità Automatico il file viene rielaborato sulla CPU.
 
 ---
 
 ## ✨ Funzionalità
 
 * **Interfaccia Moderna:** UI pulita e professionale basata su `tkinter` e `ttk` con tema chiaro.
-* **Supporto Multimediale:** Compatibile con file video (`.mp4`, `.mkv`, `.mov`, `.avi`) e audio (`.mp3`, `.wav`, `.m4a`, `.flac`).
+* **Supporto Multimediale:** Compatibile con file video (`.mp4`, `.mkv`, `.mov`, `.avi`) e audio (`.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`).
 * **Batch Processing:** Carica più file contemporaneamente e lasciali elaborare in coda in modo completamente automatico.
-* **Formati di Output Multipli:** Scegli tra `.txt` (Testo semplice), `.srt` (Sottotitoli standard), `.vtt` (Sottotitoli Web) e `.segments.txt` (Testo con timestamp).
+* **Formati di Output Multipli:** Scegli tra `.txt` (Testo semplice), `.srt` (Sottotitoli standard), `.vtt` (Sottotitoli Web) e `.segments.txt` (Testo con timestamp). I file vengono salvati accanto all'originale, con lo stesso nome; se esistono già, il programma chiede prima di sovrascriverli.
 * **Modelli Flessibili:** Scegli la "taglia" del modello AI in base alle tue esigenze (es. `tiny` per la massima velocità, `large-v3` per la massima precisione).
-* **Performance Tracking:** Benchmark automatico integrato per stimare l'ETA (Tempo rimanente stimato) in tempo reale.
-* **100% Offline:** Tutto il processo di trascrizione avviene localmente sul tuo PC, garantendo la massima sicurezza. I tuoi file non vengono inviati a nessun server esterno.
+* **Velocità vs Qualità:** `Fast`, `Balanced` e `Accurate` cambiano l'ampiezza della ricerca (beam size 1, 3, 5); il risultato è sempre lo stesso a parità di file.
+* **Dispositivo:** Automatico, GPU (CUDA) o CPU.
+* **Avanzamento e ETA in tempo reale**, calcolati sul ritmo effettivo della trascrizione.
+* **100% Offline:** La trascrizione avviene sul tuo PC; i tuoi file non vengono inviati a nessun server esterno. Serve Internet solo per scaricare un modello la prima volta.
 
 ---
 
 ## 💻 Per Sviluppatori: Installazione dal Sorgente
 
-Se preferisci eseguire il programma dal codice sorgente o vuoi contribuire al progetto, segui questi passaggi.
-
 ### 🛠️ Requisiti
-* **Python 3.8+**
-* **FFmpeg** installato e aggiunto al PATH di sistema.
+* **Python 3.9+** (provato con Python 3.13 su Windows 11)
 
-### 🚀 Installazione
-1. Clona il repository:
+### 🚀 Installazione e avvio
 ```bash
-git clone [https://github.com/LorenzoLubrano/whisper-studio-gui.git](https://github.com/LorenzoLubrano/whisper-studio-gui.git)
+git clone https://github.com/LorenzoLubrano/whisper-studio-gui.git
 cd whisper-studio-gui
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+pip install -r requirements-gpu.txt   # facoltativo, solo per GPU NVIDIA (circa 700 MB)
+python trascrivi_locale.py
+```
+
+### 🧪 Test
+```bash
+pip install -r requirements-dev.txt
+pytest            # test veloci (modello finto)
+pytest -m slow    # prove complete con il motore vero: modello tiny su CPU, voce italiana di Windows
+```
+
+### 📦 Creare l'eseguibile
+```bash
+pip install -r requirements-dev.txt
+pyinstaller WhisperStudio.spec
+```
+Il file viene creato in `dist\WhisperStudio.exe`.
