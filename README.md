@@ -18,7 +18,7 @@ Vuoi usare l'applicazione subito senza installare Python?
 
 Note:
 * **FFmpeg non serve**: l'audio dei file viene letto direttamente dal programma.
-* **Primo utilizzo di un modello**: viene scaricato da Internet una sola volta (tiny ≈ 75 MB, small ≈ 480 MB, medium ≈ 1,5 GB, large-v3 ≈ 3 GB). Da quel momento funziona anche offline.
+* **Primo utilizzo di un modello**: viene scaricato da Internet una sola volta (tiny ≈ 75 MB, small ≈ 480 MB, medium ≈ 1,5 GB, large-v3 ≈ 3 GB). Durante il download la finestra mostra la percentuale e i MB scaricati; da quel momento funziona anche offline.
 * Windows può mostrare l'avviso di SmartScreen perché l'eseguibile non è firmato: *Ulteriori informazioni → Esegui comunque*.
 
 ### ⚡ GPU NVIDIA (facoltativa)

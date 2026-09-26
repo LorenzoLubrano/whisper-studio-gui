@@ -397,3 +397,25 @@ def test_closing_while_running_stops_the_progress_animation(make_app, dialogs, m
     gate.set()
     scripts = [str(app.tk.call("after", "info", i)) for i in app.tk.call("after", "info")]
     assert not any("progressbar" in s.lower() for s in scripts)
+
+
+def test_model_download_shows_the_percentage(make_app, dialogs, media):
+    gate = threading.Event()
+    seen = []
+
+    def loader(name, device, compute_type, on_download=None):
+        on_download(0, 0)
+        on_download(50 * 2**20, 200 * 2**20)
+        gate.wait(10)
+        return FakeModel("cpu", segments=TWO_SEGS, duration=4.0)
+
+    app = make_app(loader)
+    start_with(app, [media])
+    pump_until(app, lambda: "25%" in app.lbl_status.cget("text"), timeout=15)
+    seen.append((app.lbl_status.cget("text"), str(app.progress.cget("mode")), float(app.progress.cget("value"))))
+    gate.set()
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    text, mode, value = seen[0]
+    assert "small" in text and "50" in text and "200" in text
+    assert mode == "determinate" and value == 25.0
+    assert dialogs.kinds() == ["showinfo"]

@@ -1,4 +1,5 @@
 import os
+import types
 
 import pytest
 
@@ -214,27 +215,90 @@ class FakeWhisperModel:
             raise LocalEntryNotFoundError("non in cache")
 
 
+def fake_snapshot_download(repo_id, allow_patterns=None, tqdm_class=None, **kw):
+    """Usa tqdm_class come huggingface_hub 1.x con un repository Xet (misurato su faster-whisper-base):
+    i file si registrano uno alla volta (prima i piccoli), i byte dalla rete avanzano con regolarita'
+    mentre i byte scritti ("Reconstructing") arrivano tutti alla fine."""
+    fake_snapshot_download.calls.append((repo_id, list(allow_patterns or [])))
+    transfer = tqdm_class(desc="Downloading bytes", total=0, unit="B", unit_scale=True)
+    rebuild = tqdm_class(desc="Reconstructing (incomplete total...)", total=0, unit="B", unit_scale=True)
+    rebuild.total = transfer.total = 10          # prima solo i file piccoli
+    transfer.update(10)
+    rebuild.total += 190                         # poi model.bin
+    transfer.total += 190
+    for _ in range(4):
+        transfer.update(45)
+    rebuild.update(200)
+    transfer.close()
+    rebuild.close()
+    return "C:/cache/models--Systran--faster-whisper-" + repo_id.split("-")[-1]
+
+
+class FakeHfApi:
+    fail = False
+
+    def model_info(self, repo_id, files_metadata=False):
+        if FakeHfApi.fail:
+            raise OSError("rete assente")
+        sizes = {".gitattributes": 1, "README.md": 2, "config.json": 1, "model.bin": 190, "tokenizer.json": 6,
+                 "vocabulary.txt": 3}
+        return types.SimpleNamespace(siblings=[types.SimpleNamespace(rfilename=k, size=v) for k, v in sizes.items()])
+
+
+class TickingClock:
+    """Ogni lettura dell'ora avanza di un secondo: nessun aggiornamento viene scartato dal limite di frequenza."""
+    def __init__(self):
+        self.now = 1000.0
+
+    def time(self):
+        self.now += 1.0
+        return self.now
+
+
 @pytest.fixture
 def fake_whisper(monkeypatch):
     import faster_whisper
+    import huggingface_hub
     FakeWhisperModel.cached = {"small"}
     FakeWhisperModel.calls = []
+    fake_snapshot_download.calls = []
+    FakeHfApi.fail = False
     monkeypatch.setattr(faster_whisper, "WhisperModel", FakeWhisperModel)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeHfApi)
+    monkeypatch.setattr(ws, "time", TickingClock())
     return FakeWhisperModel
 
 
 def test_cached_model_is_loaded_without_network(fake_whisper):
-    downloads = []
-    ws.load_model("small", "cpu", "auto", on_download=lambda: downloads.append(1))
+    progress = []
+    ws.load_model("small", "cpu", "auto", on_download=lambda d, t: progress.append((d, t)))
     assert fake_whisper.calls == [("small", True)]
-    assert downloads == []
+    assert progress == []
+    assert fake_snapshot_download.calls == []
 
 
-def test_missing_model_is_downloaded_and_the_user_is_told(fake_whisper):
-    downloads = []
-    ws.load_model("medium", "cpu", "auto", on_download=lambda: downloads.append(1))
-    assert fake_whisper.calls == [("medium", True), ("medium", False)]
-    assert downloads == [1]
+def test_missing_model_is_downloaded_with_progress(fake_whisper):
+    progress = []
+    ws.load_model("medium", "cpu", "auto", on_download=lambda d, t: progress.append((d, t)))
+    assert fake_snapshot_download.calls[0][0] == "Systran/faster-whisper-medium"
+    assert "model.bin" in fake_snapshot_download.calls[0][1]
+    # il modello viene poi aperto dalla cartella scaricata, senza un secondo download
+    assert fake_whisper.calls == [("medium", True), ("C:/cache/models--Systran--faster-whisper-medium", False)]
+    assert progress[0] == (0, 0)                    # "download iniziato"
+    assert progress[-1] == (200, 200)
+    during = progress[1:-1]
+    assert all(t == 200 for _, t in during)         # totale vero dall'inizio (config+model.bin+tokenizer+vocabulary)
+    assert all(d < t for d, t in during)            # niente 100% prima della fine
+    assert (100, 200) in during                     # avanza con i byte dalla rete, anche se quelli scritti sono fermi
+    assert [d for d, _ in progress] == sorted(d for d, _ in progress)
+
+
+def test_download_progress_without_size_information(fake_whisper):
+    FakeHfApi.fail = True
+    progress = []
+    ws.load_model("medium", "cpu", "auto", on_download=lambda d, t: progress.append((d, t)))
+    assert progress[0] == (0, 0) and progress[-1][0] == progress[-1][1] > 0
 
 
 @needs_windows

@@ -80,3 +80,23 @@ def test_real_unreadable_file_shows_error(app_real, dialogs, tmp_path):
     errors = [c for c in dialogs.calls if c[0] == "showerror"]
     assert len(errors) == 1 and "rotto.mp3" in errors[0][2]
     assert not (tmp_path / "rotto.txt").exists()
+
+
+def test_real_download_reports_progress(tmp_path):
+    """Scarica davvero il modello tiny (circa 75 MB) in una cache vuota e controlla l'avanzamento."""
+    import json
+    import sys
+    code = (
+        "import json, sys; sys.path.insert(0, %r); import trascrivi_locale as ws; rec = []; "
+        "ws.load_model('tiny', 'cpu', 'auto', on_download=lambda d, t: rec.append((d, t))); "
+        "print(json.dumps(rec))" % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    env = dict(os.environ, HF_HUB_CACHE=str(tmp_path / "cache"), HF_HUB_DISABLE_SYMLINKS_WARNING="1")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=600)
+    assert r.returncode == 0, r.stderr[-2000:]
+    rec = json.loads(r.stdout.strip().splitlines()[-1])
+    assert rec[0] == [0, 0]
+    done, total = rec[-1]
+    assert total > 50 * 2**20 and done == total
+    assert len(rec) > 3  # percentuali intermedie, non solo inizio e fine
+    assert all(a[0] <= b[0] for a, b in zip(rec[1:], rec[2:]))

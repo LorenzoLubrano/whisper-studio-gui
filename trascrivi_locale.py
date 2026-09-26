@@ -219,6 +219,71 @@ def compute_type_for(device: str, requested: str) -> str:
         return "auto"
     return requested
 
+# gli stessi file che scarica faster-whisper per un modello
+MODEL_FILES = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]
+
+def _download_progress_tqdm(report, known_total=0):
+    """Classe tqdm per snapshot_download: nessun output su console, byte scaricati a report(fatti, totali).
+
+    huggingface_hub crea due barre in byte: "Downloading bytes" (dalla rete) e "Reconstructing ..."
+    (scritti su disco). Con i repository Xet i byte scritti restano fermi fino alla fine, quelli
+    dalla rete avanzano con regolarita': si usa il maggiore dei due. Il totale e' quello vero dei file
+    (known_total); senza, quello che la libreria conosce finora.
+    """
+    import io
+    from tqdm import tqdm as base_tqdm
+    byte_bars = []
+    last = [0.0]
+
+    class ProgressTqdm(base_tqdm):
+        def __init__(self, *args, **kwargs):
+            kwargs["file"] = io.StringIO()  # nell'exe non c'e' una console
+            kwargs["mininterval"] = 3600     # il disegno testuale della barra non serve
+            super().__init__(*args, **kwargs)
+            if self.unit == "B":
+                byte_bars.append(self)
+
+        def update(self, n=1):
+            out = super().update(n)
+            if self.unit == "B":
+                total = known_total or max(int(b.total or 0) for b in byte_bars)
+                done = min(max(int(b.n) for b in byte_bars), total)
+                now = time.time()
+                # il 100% arriva solo a download finito (lo manda download_model_with_progress)
+                if total and done < total and now - last[0] > 0.2:
+                    last[0] = now
+                    report(done, total)
+            return out
+
+    ProgressTqdm.byte_bars = byte_bars
+    return ProgressTqdm
+
+def _download_size(repo_id: str) -> int:
+    """Byte totali dei file del modello, chiesti a Hugging Face prima di scaricare (0 se non disponibile)."""
+    import fnmatch
+    import huggingface_hub
+    try:
+        info = huggingface_hub.HfApi().model_info(repo_id, files_metadata=True)
+        return sum(int(s.size or 0) for s in info.siblings
+                   if any(fnmatch.fnmatch(s.rfilename, p) for p in MODEL_FILES))
+    except Exception:
+        return 0
+
+def download_model_with_progress(name: str, report) -> str:
+    import huggingface_hub
+    try:
+        from faster_whisper.utils import _MODELS
+        repo_id = name if "/" in name else _MODELS[name]
+    except (ImportError, KeyError):
+        repo_id = f"Systran/faster-whisper-{name}"
+    total = _download_size(repo_id)
+    tqdm_class = _download_progress_tqdm(report, total)
+    path = huggingface_hub.snapshot_download(repo_id, allow_patterns=MODEL_FILES, tqdm_class=tqdm_class)
+    final = total or max((int(b.total or 0) for b in tqdm_class.byte_bars), default=0)
+    if final:
+        report(final, final)
+    return path
+
 def load_model(name: str, device: str, compute_type: str, on_download=None):
     from faster_whisper import WhisperModel
     from huggingface_hub.utils import LocalEntryNotFoundError
@@ -226,9 +291,10 @@ def load_model(name: str, device: str, compute_type: str, on_download=None):
         # prima dal disco: niente rete se il modello e' gia' stato scaricato
         return WhisperModel(name, device=device, compute_type=compute_type, local_files_only=True)
     except LocalEntryNotFoundError:
-        if on_download:
-            on_download()
-        return WhisperModel(name, device=device, compute_type=compute_type)
+        report = on_download or (lambda done, total: None)
+        report(0, 0)  # download iniziato, dimensione non ancora nota
+        path = download_model_with_progress(name, report)
+        return WhisperModel(path, device=device, compute_type=compute_type)
 
 # =======================
 #   APP (FASTER-WHISPER)
@@ -684,6 +750,17 @@ class WhisperGUI(tk.Tk):
         eta = estimate_eta(time.time() - self.file_start, self.file_done_sec, self.file_total_sec)
         self.lbl_eta.config(text="ETA: calcolo..." if eta is None else f"ETA: {hhmmss(eta)}")
 
+    def _download_progress(self, model_name, done, total):
+        if total <= 0:
+            self.lbl_status.config(text=f"Download del modello '{model_name}' da Internet (solo la prima volta)...")
+            return
+        pct = min(100.0, done / total * 100.0)
+        self.progress.stop()
+        self.progress.config(mode="determinate", maximum=100, value=pct)
+        mb = 2 ** 20
+        self.lbl_status.config(text=f"Download del modello '{model_name}': {pct:.0f}% "
+                                    f"({done / mb:.0f} di {total / mb:.0f} MB, solo la prima volta)")
+
     def _begin_file(self, status):
         # nuovo file: niente percentuale ne' ETA del file precedente finche' non parte la trascrizione
         self.lbl_status.config(text=status)
@@ -897,8 +974,8 @@ class WhisperGUI(tk.Tk):
         compute_type = compute_type_for(device, cfg["compute_type"])
         self._post("_set_status", f"Caricamento modello '{model_name}' in memoria...")
 
-        def on_download():
-            self._post("_set_status", f"Download del modello '{model_name}' da Internet (solo la prima volta)...")
+        def on_download(done=0, total=0):
+            self._post("_download_progress", model_name, done, total)
 
         try:
             model = self._load_model_fn(model_name, device, compute_type, on_download=on_download)
