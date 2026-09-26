@@ -23,7 +23,7 @@ Note:
 
 ### ⚡ GPU NVIDIA (facoltativa)
 Con **Dispositivo: Automatico** il programma usa la GPU NVIDIA quando trova le librerie CUDA 12 (cuBLAS); altrimenti usa la CPU e lo scrive in basso a sinistra (es. *«CPU (GPU NVIDIA trovata, ma mancano le librerie CUDA 12 cuBLAS)»*). Per attivare la GPU:
-* **il modo più semplice:** premi **«Attiva GPU NVIDIA»** in basso a sinistra (compare solo se hai una scheda NVIDIA senza le librerie). Il programma scarica 527 MB da pypi.org (il pacchetto ufficiale NVIDIA `nvidia-cublas-cu12` 12.9.2.10), controlla che l'impronta SHA-256 sia esattamente quella attesa e installa le due librerie in `%LOCALAPPDATA%\WhisperStudio\cuda12` (circa 740 MB). La GPU si usa subito, senza riavviare; «Interrompi» ferma il download. Le librerie sono di NVIDIA e soggette alla sua licenza;
+* **il modo più semplice:** premi **«Attiva GPU NVIDIA»** in basso a sinistra (compare solo se hai una scheda NVIDIA senza le librerie). Il programma scarica 527 MB da pypi.org (il pacchetto ufficiale NVIDIA `nvidia-cublas-cu12` 12.9.2.10), controlla che l'impronta SHA-256 sia esattamente quella attesa e installa le due librerie in `%LOCALAPPDATA%\WhisperStudio\cuda12` (circa 740 MB; durante l'installazione servono circa 1,3 GB liberi). La GPU si usa subito, senza riavviare; «Interrompi» ferma il download. Le librerie sono di NVIDIA e soggette alla sua licenza;
 * oppure installare il [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit-archive) **12.x**, dalla 12.8 in poi (la versione 13 non contiene le librerie CUDA 12);
 * oppure copiare `cublas64_12.dll` e `cublasLt64_12.dll` nella stessa cartella di `WhisperStudio.exe` (si trovano nel pacchetto pip `nvidia-cublas-cu12`, cartella `nvidia/cublas/bin`).
 

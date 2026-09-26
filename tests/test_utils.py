@@ -501,7 +501,15 @@ def test_not_enough_disk_space_is_checked_first(fake_pypi, tmp_path, monkeypatch
     assert fake_pypi["requests"] == []                    # nessun download inutile
 
 
-def test_cancel_during_extraction_installs_nothing(fake_pypi, tmp_path):
+def test_cancel_right_before_the_final_move_installs_nothing(fake_pypi, tmp_path):
+    # chiamate allo stop: 2 nel download, 1 dopo la verifica, 1 per ciascuna delle 2 DLL, poi quella finale
+    asked = []
+    with pytest.raises(ws.DownloadCancelled):
+        ws.install_cuda_libraries(should_stop=lambda: asked.append(1) or len(asked) >= 6)
+    assert installed_files(tmp_path) == []
+
+
+def test_cancel_right_after_verification_installs_nothing(fake_pypi, tmp_path):
     # il finto pacchetto arriva in un solo blocco: il download chiede lo stop 2 volte (prima del blocco e
     # prima della lettura finale vuota); "Interrompi" premuto dopo deve fermare verifica ed estrazione
     asked = []

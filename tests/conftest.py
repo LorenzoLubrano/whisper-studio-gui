@@ -81,6 +81,12 @@ class Dialogs:
         return [c[0] for c in self.calls]
 
 
+@pytest.fixture(autouse=True)
+def isolated_user_data(tmp_path, monkeypatch):
+    """Ogni finestra all'avvio ripulisce gli avanzi in LOCALAPPDATA/WhisperStudio: nei test mai il profilo vero."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+
+
 @pytest.fixture
 def dialogs(monkeypatch):
     d = Dialogs()

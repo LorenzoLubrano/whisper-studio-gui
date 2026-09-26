@@ -151,7 +151,9 @@ def gpu_lib_dir() -> str:
 
 def gpu_button_supported() -> bool:
     # il pacchetto NVIDIA scaricato dal pulsante e' per Windows a 64 bit (x86-64)
-    return os.name == "nt" and platform.machine().upper() in ("AMD64", "X86_64")
+    # (platform.machine() la prima volta interroga WMI: chiamarla fuori dal thread della finestra)
+    return (os.name == "nt" and platform.machine().upper() in ("AMD64", "X86_64")
+            and bool(gpu_lib_dir()))
 
 def clean_gpu_install_leftovers():
     """Cancella le cartelle provvisorie di installazioni interrotte (finestra chiusa, crash).
@@ -329,7 +331,8 @@ def install_cuda_libraries(report=None, should_stop=None) -> str:
             while True:
                 check_stop()
                 try:
-                    chunk = response.read(1 << 20)
+                    # blocchi piccoli: "Interrompi" risponde presto anche su connessioni lente
+                    chunk = response.read(256 * 1024)
                 except (OSError, http.client.HTTPException) as err:
                     raise network_error(err) from err
                 if not chunk:
@@ -504,6 +507,7 @@ class WhisperGUI(tk.Tk):
         self._gpu_installer = gpu_installer or install_cuda_libraries
         self._gpu_missing = False  # GPU NVIDIA presente ma senza cuBLAS: si offre il pulsante
         self._gpu_installing = False
+        self._gpu_supported = False  # Windows x64 con cartella dati valida (dal thread del rilevamento)
 
         # ---- Modern Palette (Slate & Blue) ----
         self.COL_BG_MAIN    = "#f1f5f9"  # Slate 100
@@ -850,12 +854,14 @@ class WhisperGUI(tk.Tk):
                 _, description = self._device_probe()
             except Exception:
                 description = "CPU"
-            self._post("_accel_detected", description)
+            self._post("_accel_detected", description, gpu_button_supported())
         threading.Thread(target=probe, daemon=True).start()
 
-    def _accel_detected(self, description):
+    def _accel_detected(self, description, supported=None):
+        if supported is not None:  # calcolato nel thread del rilevamento
+            self._gpu_supported = supported
         self.accel_label_var.set(f"Acceleratore: {description}")
-        self._gpu_missing = description == MISSING_CUBLAS and gpu_button_supported()
+        self._gpu_missing = description == MISSING_CUBLAS and self._gpu_supported
         self._refresh_gpu_button()
 
     def _refresh_gpu_button(self):
