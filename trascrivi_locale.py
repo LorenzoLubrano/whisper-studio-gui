@@ -1,4 +1,5 @@
 import os
+import platform
 import re
 import sys
 import time
@@ -135,11 +136,59 @@ CUBLAS_WHEEL_FILES = ("nvidia/cublas/bin/cublas64_12.dll", "nvidia/cublas/bin/cu
 class GpuSetupError(RuntimeError):
     """Attivazione della GPU non riuscita, con un messaggio da mostrare all'utente."""
 
+# spazio necessario durante l'installazione: pacchetto scaricato + le due DLL estratte + margine
+GPU_INSTALL_PEAK = CUBLAS_WHEEL_SIZE + 771191808 + 64 * 2**20
+
 def gpu_lib_dir() -> str:
     """Dove il pulsante "Attiva GPU NVIDIA" installa cuBLAS: nei dati dell'utente, non accanto all'exe
-    (che puo' stare in Download, in una cartella di sola lettura o essere sostituito)."""
+    (che puo' stare in Download, in una cartella di sola lettura o essere sostituito).
+    Stringa vuota se la cartella dei dati non e' un percorso assoluto: meglio rinunciare che scrivere
+    in un posto relativo alla cartella corrente."""
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    if not os.path.isabs(base):
+        return ""
     return os.path.join(base, "WhisperStudio", "cuda12")
+
+def gpu_button_supported() -> bool:
+    # il pacchetto NVIDIA scaricato dal pulsante e' per Windows a 64 bit (x86-64)
+    return os.name == "nt" and platform.machine().upper() in ("AMD64", "X86_64")
+
+def clean_gpu_install_leftovers():
+    """Cancella le cartelle provvisorie di installazioni interrotte (finestra chiusa, crash).
+
+    Salta quelle modificate negli ultimi 2 minuti: potrebbero essere il download in corso di un'altra
+    finestra di Whisper Studio.
+    """
+    import shutil
+    dest = gpu_lib_dir()
+    if not dest:
+        return
+    parent = os.path.dirname(dest)
+    try:
+        names = [n for n in os.listdir(parent) if n.startswith("cuda12-")]
+    except OSError:
+        return
+    now = time.time()
+    for name in names:
+        path = os.path.join(parent, name)
+        try:
+            latest = max([os.path.getmtime(path)] + [os.path.getmtime(os.path.join(path, f))
+                                                     for f in os.listdir(path)])
+        except OSError:
+            continue
+        if now - latest > 120:
+            shutil.rmtree(path, ignore_errors=True)
+
+def _replace_with_retry(src, dst, attempts=5):
+    # un antivirus puo' tenere aperte per qualche istante le DLL appena scritte
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.5)
 
 def cuda_library_dirs() -> list:
     """Cartelle note in cui cercare le librerie CUDA 12 (cuBLAS). Mai la cartella corrente."""
@@ -219,55 +268,105 @@ def install_cuda_libraries(report=None, should_stop=None) -> str:
     colpo solo. Qualunque errore o interruzione non lascia nulla di installato.
     """
     import hashlib
+    import http.client
     import shutil
+    import urllib.error
     import urllib.request
     import zipfile
     report = report or (lambda done, total: None)
+
+    def check_stop():
+        if should_stop and should_stop():
+            raise DownloadCancelled("download annullato")
+
+    def network_error(err):
+        return GpuSetupError("Download delle librerie NVIDIA non riuscito: controlla la connessione e "
+                             f"riprova.\n\n({describe(err)})")
+
+    def disk_error(err):
+        return GpuSetupError(f"Impossibile scrivere le librerie NVIDIA sul disco.\n\n({describe(err)})")
+
     dest = gpu_lib_dir()
+    if not dest:
+        raise GpuSetupError("Non trovo la cartella dei dati dell'utente (LOCALAPPDATA): le librerie "
+                            "NVIDIA non possono essere installate.")
     parent = os.path.dirname(dest)
-    os.makedirs(parent, exist_ok=True)
-    # avanzi di un'installazione interrotta (es. finestra chiusa durante il download)
-    for name in os.listdir(parent):
-        if name.startswith("cuda12-"):
-            shutil.rmtree(os.path.join(parent, name), ignore_errors=True)
-    staging = tempfile.mkdtemp(prefix="cuda12-", dir=parent)
+    try:
+        os.makedirs(parent, exist_ok=True)
+        clean_gpu_install_leftovers()
+        free = shutil.disk_usage(parent).free
+    except OSError as err:
+        raise disk_error(err) from err
+    if free < GPU_INSTALL_PEAK:
+        raise GpuSetupError(f"Non c'è abbastanza spazio su disco: durante l'installazione servono circa "
+                            f"{GPU_INSTALL_PEAK // 2**20} MB liberi (alla fine ne restano occupati circa "
+                            f"740), ce ne sono {free // 2**20}.")
+    try:
+        staging = tempfile.mkdtemp(prefix="cuda12-", dir=parent)
+    except OSError as err:
+        raise disk_error(err) from err
     try:
         wheel = os.path.join(staging, "cublas.whl")
         digest = hashlib.sha256()
         done = 0
         request = urllib.request.Request(CUBLAS_WHEEL_URL, headers={"User-Agent": "WhisperStudio"})
         try:
-            with urllib.request.urlopen(request, timeout=60) as response, open(wheel, "wb") as out:
-                while True:
-                    if should_stop and should_stop():
-                        raise DownloadCancelled("download annullato")
+            response = urllib.request.urlopen(request, timeout=30)
+        except urllib.error.HTTPError as err:
+            if err.code in (404, 410):
+                raise GpuSetupError("Il pacchetto delle librerie NVIDIA non è più disponibile su PyPI: "
+                                    "serve una versione aggiornata di Whisper Studio.") from err
+            raise GpuSetupError(f"Il server dei pacchetti ha risposto con un errore ({err.code}): riprova "
+                                "più tardi.") from err
+        except (OSError, http.client.HTTPException) as err:
+            raise network_error(err) from err
+        try:
+            out = open(wheel, "wb")
+        except OSError as err:
+            response.close()
+            raise disk_error(err) from err
+        with response, out:
+            while True:
+                check_stop()
+                try:
                     chunk = response.read(1 << 20)
-                    if not chunk:
-                        break
+                except (OSError, http.client.HTTPException) as err:
+                    raise network_error(err) from err
+                if not chunk:
+                    break
+                done += len(chunk)
+                if done > CUBLAS_WHEEL_SIZE:
+                    raise GpuSetupError("Il server ha inviato più dati della dimensione prevista: download "
+                                        "interrotto, non è stato installato nulla.")
+                try:
                     out.write(chunk)
-                    digest.update(chunk)
-                    done += len(chunk)
-                    report(min(done, CUBLAS_WHEEL_SIZE), CUBLAS_WHEEL_SIZE)
-        except OSError as err:  # rete assente, server irraggiungibile, disco pieno...
-            raise GpuSetupError("Download delle librerie NVIDIA non riuscito: controlla la connessione "
-                                f"e riprova.\n\n({describe(err)})") from err
+                except OSError as err:
+                    raise disk_error(err) from err
+                digest.update(chunk)
+                report(done, CUBLAS_WHEEL_SIZE)
+        if done != CUBLAS_WHEEL_SIZE:
+            raise GpuSetupError("Download incompleto: la connessione si è interrotta prima della fine. "
+                                "Riprova.")
         if digest.hexdigest() != CUBLAS_WHEEL_SHA256:
             raise GpuSetupError("Il file scaricato non corrisponde a quello atteso: per sicurezza non è "
                                 "stato installato nulla.")
+        check_stop()
         out_dir = os.path.join(staging, "cuda12")
-        os.makedirs(out_dir)
         try:
+            os.makedirs(out_dir)
             with zipfile.ZipFile(wheel) as archive:
                 for member in CUBLAS_WHEEL_FILES:
+                    check_stop()
                     target = os.path.join(out_dir, member.rsplit("/", 1)[-1])
                     with archive.open(member) as src, open(target, "wb") as dst:
                         shutil.copyfileobj(src, dst, 1 << 20)
+            os.remove(wheel)
+            check_stop()
+            if os.path.lexists(dest):
+                shutil.rmtree(dest)  # sostituita per intero, mai un misto di vecchio e nuovo
+            _replace_with_retry(out_dir, dest)
         except (KeyError, zipfile.BadZipFile, OSError) as err:
             raise GpuSetupError(f"Installazione delle librerie NVIDIA non riuscita.\n\n({describe(err)})") from err
-        os.remove(wheel)
-        if os.path.exists(dest):
-            shutil.rmtree(dest)  # sostituita per intero, mai un misto di vecchio e nuovo
-        os.replace(out_dir, dest)
         return dest
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -404,6 +503,7 @@ class WhisperGUI(tk.Tk):
         self._device_probe = device_probe or cuda_status
         self._gpu_installer = gpu_installer or install_cuda_libraries
         self._gpu_missing = False  # GPU NVIDIA presente ma senza cuBLAS: si offre il pulsante
+        self._gpu_installing = False
 
         # ---- Modern Palette (Slate & Blue) ----
         self.COL_BG_MAIN    = "#f1f5f9"  # Slate 100
@@ -743,6 +843,10 @@ class WhisperGUI(tk.Tk):
     def _detect_accelerator(self):
         def probe():
             try:
+                clean_gpu_install_leftovers()  # avanzi di un'installazione interrotta (finestra chiusa, crash)
+            except Exception:
+                pass
+            try:
                 _, description = self._device_probe()
             except Exception:
                 description = "CPU"
@@ -751,7 +855,7 @@ class WhisperGUI(tk.Tk):
 
     def _accel_detected(self, description):
         self.accel_label_var.set(f"Acceleratore: {description}")
-        self._gpu_missing = description == MISSING_CUBLAS
+        self._gpu_missing = description == MISSING_CUBLAS and gpu_button_supported()
         self._refresh_gpu_button()
 
     def _refresh_gpu_button(self):
@@ -772,12 +876,15 @@ class WhisperGUI(tk.Tk):
                 "Per usare la scheda video NVIDIA servono le librerie CUDA di NVIDIA (cuBLAS).\n\n"
                 f"• Download: {int(CUBLAS_WHEEL_SIZE / 2**20)} MB da pypi.org, il pacchetto ufficiale NVIDIA "
                 "nvidia-cublas-cu12 12.9.2.10\n"
-                f"• Spazio su disco: circa 740 MB in\n  {gpu_lib_dir()}\n"
+                f"• Spazio su disco: circa {f'{GPU_INSTALL_PEAK / 2**30:.1f}'.replace('.', ',')} GB liberi "
+                f"durante l'installazione, poi 740 MB in\n  {gpu_lib_dir()}\n"
                 "• Il file viene verificato prima di installarlo\n"
                 "• Le librerie sono di NVIDIA e soggette alla sua licenza\n\n"
                 "Scaricare adesso?"):
             return
         self.stop_requested.clear()
+        self.file_start = None  # niente ETA di un lavoro precedente durante il download
+        self._gpu_installing = True
         self.set_ui_running(True)
         self.lbl_status.config(text="Download delle librerie NVIDIA...")
         threading.Thread(target=self._run_gpu_install, daemon=True).start()
@@ -922,8 +1029,11 @@ class WhisperGUI(tk.Tk):
             self.progress.config(mode="determinate")
             self.btn_start.config(state="normal")
             self.btn_stop.config(state="disabled")
+            if self.output_dir:
+                self.btn_open.config(state="normal")
             self.listbox.config(state="normal")
             self.lbl_eta.config(text="--:--:--")
+            self._gpu_installing = False
         self._refresh_gpu_button()
 
     def _start_file_progress(self, duration):
@@ -1039,9 +1149,12 @@ class WhisperGUI(tk.Tk):
 
     def _on_close(self):
         if self.running:
-            if not messagebox.askyesno(
-                    "Chiudere Whisper Studio?",
-                    "C'è un'elaborazione in corso: il file in corso non verrà salvato.\n\nChiudere comunque?"):
+            if self._gpu_installing:
+                question = ("È in corso il download delle librerie NVIDIA: verrà annullato e non sarà installato "
+                            "nulla.\n\nChiudere comunque?")
+            else:
+                question = "C'è un'elaborazione in corso: il file in corso non verrà salvato.\n\nChiudere comunque?"
+            if not messagebox.askyesno("Chiudere Whisper Studio?", question):
                 return
             self.stop_requested.set()
         self.destroy()

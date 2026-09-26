@@ -559,3 +559,92 @@ def test_gpu_install_can_be_cancelled(make_app, dialogs):
     pump_until(app, lambda: is_idle(app) and len(dialogs.calls) == 2, timeout=15)
     assert dialogs.kinds() == ["askyesno", "showinfo"]
     assert "annullat" in dialogs.calls[1][2].lower()
+
+
+def gated_installer(gate):
+    def installer(report=None, should_stop=None):
+        report(10, 553162896)
+        gate.wait(10)
+        return "C:/x/cuda12"
+    return installer
+
+
+def test_gpu_button_is_offered_only_on_64_bit_windows(make_app, monkeypatch):
+    import trascrivi_locale as ws
+    monkeypatch.setattr(ws.platform, "machine", lambda: "ARM64")
+    app = make_app(Loader({}), probe=("cpu", ws.MISSING_CUBLAS))
+    assert not gpu_button_shown(app)
+
+
+def test_closing_during_the_gpu_install_talks_about_the_download(make_app, dialogs):
+    import trascrivi_locale as ws
+    gate = threading.Event()
+    app = make_app(Loader({}), probe=("cpu", ws.MISSING_CUBLAS), installer=gated_installer(gate))
+    app.btn_gpu.invoke()
+    pump_until(app, lambda: "%" in app.lbl_status.cget("text"), timeout=15)
+    dialogs.answer = False
+    app._on_close()
+    gate.set()
+    assert "NVIDIA" in dialogs.calls[-1][2]
+    assert "file in corso" not in dialogs.calls[-1][2]
+
+
+def test_leftovers_are_cleaned_at_startup(make_app, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    leftover = tmp_path / "WhisperStudio" / "cuda12-interrotto"
+    leftover.mkdir(parents=True)
+    (leftover / "cublas.whl").write_bytes(b"x" * 1000)
+    old = __import__("time").time() - 600
+    for p in (leftover, leftover / "cublas.whl"):
+        os.utime(p, (old, old))
+    app = make_app(Loader({}))
+    pump_until(app, lambda: not leftover.exists(), timeout=5)
+
+
+def test_no_stale_eta_during_the_gpu_install(make_app, dialogs):
+    import time
+    import trascrivi_locale as ws
+    gate = threading.Event()
+    app = make_app(Loader({}), probe=("cpu", ws.MISSING_CUBLAS), installer=gated_installer(gate))
+    app.file_start, app.file_total_sec, app.file_done_sec = time.time() - 10, 60.0, 5.0  # lavoro precedente
+    app.btn_gpu.invoke()
+    pump_for(app, 1.2)
+    eta = app.lbl_eta.cget("text")
+    gate.set()
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert eta == "--:--:--"
+
+
+def test_open_output_folder_stays_available_after_the_gpu_install(make_app, dialogs, tmp_path):
+    import trascrivi_locale as ws
+    gate = threading.Event()
+    app = make_app(Loader({}), probe=("cpu", ws.MISSING_CUBLAS), installer=gated_installer(gate))
+    app.output_dir = str(tmp_path)          # c'e' gia' stato un lavoro
+    app.btn_open.config(state="normal")
+    app.btn_gpu.invoke()
+    gate.set()
+    pump_until(app, lambda: is_idle(app) and len(dialogs.calls) == 2, timeout=15)
+    assert str(app.btn_open.cget("state")) == "normal"
+
+
+def test_libraries_installed_but_gpu_still_unusable_is_a_warning(make_app, dialogs):
+    import trascrivi_locale as ws
+    app = make_app(Loader({}), probe=("cpu", ws.MISSING_CUBLAS), installer=lambda **kw: "C:/x/cuda12")
+    app.btn_gpu.invoke()
+    pump_until(app, lambda: is_idle(app) and len(dialogs.calls) == 2, timeout=15)
+    assert dialogs.kinds() == ["askyesno", "showwarning"]
+    assert gpu_button_shown(app)
+
+
+def test_gpu_button_hides_during_a_transcription_and_returns_after(make_app, dialogs, media):
+    import trascrivi_locale as ws
+    gate = threading.Event()
+    model = FakeModel("cpu", segments=TWO_SEGS, duration=4.0, gate=gate)
+    app = make_app(Loader({"cpu": model}), probe=("cpu", ws.MISSING_CUBLAS))
+    assert gpu_button_shown(app)
+    start_with(app, [media])
+    pump_until(app, lambda: model.calls, timeout=15)
+    hidden = app.btn_gpu.winfo_manager() == ""
+    gate.set()
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert hidden and gpu_button_shown(app)

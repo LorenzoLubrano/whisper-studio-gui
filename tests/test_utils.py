@@ -1,4 +1,5 @@
 import os
+import time
 import types
 
 import pytest
@@ -155,6 +156,8 @@ def no_cuda_env(tmp_path, monkeypatch):
     empty.mkdir()
     monkeypatch.setattr(ws, "APP_DIR", str(empty))
     monkeypatch.setenv("PATH", "")
+    # anche la cartella del pulsante "Attiva GPU NVIDIA": sul PC di sviluppo puo' contenere cuBLAS vero
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata-vuota"))
     for k in list(os.environ):
         if k.upper().startswith("CUDA_PATH"):
             monkeypatch.delenv(k)
@@ -378,6 +381,12 @@ def fake_pypi(tmp_path, monkeypatch):
     return state
 
 
+def make_old(folder, seconds=600):
+    old = time.time() - seconds
+    for p in [folder, *folder.rglob("*")]:
+        os.utime(p, (old, old))
+
+
 def installed_files(tmp_path):
     root = tmp_path / "appdata"
     return sorted(str(p.relative_to(root)).replace("\\", "/") for p in root.rglob("*") if p.is_file())
@@ -397,7 +406,9 @@ def test_gpu_libraries_are_downloaded_verified_and_installed(fake_pypi, tmp_path
 
 
 def test_gpu_libraries_with_the_wrong_fingerprint_are_not_installed(fake_pypi, tmp_path):
-    fake_pypi["body"] = make_fake_wheel(extra={"nvidia/cublas/bin/altro.dll": b"sorpresa"})
+    body = bytearray(fake_pypi["body"])
+    body[-1] ^= 0xFF                                       # stessa dimensione, un byte diverso
+    fake_pypi["body"] = bytes(body)
     with pytest.raises(ws.GpuSetupError, match="non corrisponde"):
         ws.install_cuda_libraries()
     assert installed_files(tmp_path) == []
@@ -427,6 +438,7 @@ def test_leftovers_of_an_interrupted_install_are_cleaned(fake_pypi, tmp_path):
     leftover = tmp_path / "appdata" / "WhisperStudio" / "cuda12-vecchio"
     leftover.mkdir(parents=True)
     (leftover / "cublas.whl").write_bytes(b"x" * 1000)  # es. finestra chiusa durante il download
+    make_old(leftover)
     ws.install_cuda_libraries()
     assert installed_files(tmp_path) == ["WhisperStudio/cuda12/cublas64_12.dll",
                                          "WhisperStudio/cuda12/cublasLt64_12.dll"]
@@ -440,3 +452,129 @@ def test_leftovers_of_an_interrupted_install_are_cleaned(fake_pypi, tmp_path):
 ])
 def test_download_progress_text(done, total, expected):
     assert ws.progress_text(done, total) == expected
+
+
+# ---------- dalla revisione del pulsante GPU ----------
+
+def test_download_bigger_than_expected_is_stopped(fake_pypi, tmp_path):
+    fake_pypi["body"] = fake_pypi["body"] + b"x" * 5000   # il server manda piu' del previsto
+    with pytest.raises(ws.GpuSetupError, match="dimensione"):
+        ws.install_cuda_libraries()
+    assert installed_files(tmp_path) == []
+
+
+def test_truncated_download_is_reported_as_incomplete(fake_pypi, tmp_path):
+    fake_pypi["body"] = fake_pypi["body"][:100]            # connessione chiusa a meta'
+    with pytest.raises(ws.GpuSetupError, match="incomplet"):
+        ws.install_cuda_libraries()
+    assert installed_files(tmp_path) == []
+
+
+def test_package_no_longer_available_is_explained(fake_pypi, tmp_path):
+    import urllib.error
+    fake_pypi["error"] = urllib.error.HTTPError(ws.CUBLAS_WHEEL_URL, 404, "Not Found", {}, None)
+    with pytest.raises(ws.GpuSetupError, match="non è più disponibile"):
+        ws.install_cuda_libraries()
+
+
+def test_protocol_errors_are_explained_in_italian(fake_pypi, tmp_path, monkeypatch):
+    import http.client
+    import urllib.request
+
+    class Broken(FakeResponse):
+        def read(self, n=-1):
+            raise http.client.IncompleteRead(b"", 10)
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: Broken(b""))
+    with pytest.raises(ws.GpuSetupError, match="connessione"):
+        ws.install_cuda_libraries()
+    assert installed_files(tmp_path) == []
+
+
+def test_not_enough_disk_space_is_checked_first(fake_pypi, tmp_path, monkeypatch):
+    import collections
+    import shutil
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(10**12, 10**12 - 10**6, 10**6))
+    with pytest.raises(ws.GpuSetupError, match="spazio"):
+        ws.install_cuda_libraries()
+    assert fake_pypi["requests"] == []                    # nessun download inutile
+
+
+def test_cancel_during_extraction_installs_nothing(fake_pypi, tmp_path):
+    # il finto pacchetto arriva in un solo blocco: il download chiede lo stop 2 volte (prima del blocco e
+    # prima della lettura finale vuota); "Interrompi" premuto dopo deve fermare verifica ed estrazione
+    asked = []
+    with pytest.raises(ws.DownloadCancelled):
+        ws.install_cuda_libraries(should_stop=lambda: asked.append(1) or len(asked) >= 3)
+    assert installed_files(tmp_path) == []
+
+
+def test_existing_installation_is_replaced_whole(fake_pypi, tmp_path):
+    old = tmp_path / "appdata" / "WhisperStudio" / "cuda12"
+    old.mkdir(parents=True)
+    (old / "cublas64_12.dll").write_bytes(b"vecchia")
+    (old / "avanzo.dll").write_bytes(b"vecchio")
+    ws.install_cuda_libraries()
+    assert installed_files(tmp_path) == ["WhisperStudio/cuda12/cublas64_12.dll",
+                                         "WhisperStudio/cuda12/cublasLt64_12.dll"]
+
+
+def test_package_without_the_expected_libraries_installs_nothing(fake_pypi, tmp_path, monkeypatch):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("nvidia/cublas/bin/cublas64_12.dll", b"MZ solo una")
+    body = buf.getvalue()
+    fake_pypi["body"] = body
+    monkeypatch.setattr(ws, "CUBLAS_WHEEL_SHA256", hashlib.sha256(body).hexdigest())
+    monkeypatch.setattr(ws, "CUBLAS_WHEEL_SIZE", len(body))
+    with pytest.raises(ws.GpuSetupError):
+        ws.install_cuda_libraries()
+    assert installed_files(tmp_path) == []
+
+
+def test_filesystem_errors_are_explained(fake_pypi, tmp_path):
+    blocker = tmp_path / "appdata" / "WhisperStudio" / "cuda12"
+    blocker.parent.mkdir(parents=True)
+    blocker.write_text("un file al posto della cartella", encoding="utf-8")
+    with pytest.raises(ws.GpuSetupError):
+        ws.install_cuda_libraries()
+
+
+def test_final_move_is_retried_when_the_antivirus_holds_the_files(fake_pypi, tmp_path, monkeypatch):
+    real_replace = ws.os.replace
+    attempts = []
+
+    def flaky(src, dst):
+        attempts.append(dst)
+        if len(attempts) < 3:
+            raise PermissionError(5, "Accesso negato")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(ws.os, "replace", flaky)
+    monkeypatch.setattr(ws.time, "sleep", lambda s: None)
+    ws.install_cuda_libraries()
+    assert len(attempts) == 3
+    assert installed_files(tmp_path)[0] == "WhisperStudio/cuda12/cublas64_12.dll"
+
+
+def test_relative_data_folder_is_refused(fake_pypi, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", "relativo")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ws.GpuSetupError):
+        ws.install_cuda_libraries()
+    assert not (tmp_path / "relativo").exists()
+
+
+def test_leftovers_can_be_cleaned_without_installing(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    leftover = tmp_path / "WhisperStudio" / "cuda12-abc"
+    leftover.mkdir(parents=True)
+    (leftover / "cublas.whl").write_bytes(b"x")
+    make_old(leftover)
+    fresh = tmp_path / "WhisperStudio" / "cuda12-altra-finestra"   # download in corso in un'altra finestra
+    fresh.mkdir()
+    (fresh / "cublas.whl").write_bytes(b"y")
+    (tmp_path / "WhisperStudio" / "cuda12").mkdir()
+    ws.clean_gpu_install_leftovers()
+    assert sorted(p.name for p in (tmp_path / "WhisperStudio").iterdir()) == ["cuda12", "cuda12-altra-finestra"]
