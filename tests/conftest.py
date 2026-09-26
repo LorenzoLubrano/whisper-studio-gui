@@ -99,8 +99,9 @@ def dialogs(monkeypatch):
 def make_app():
     apps = []
 
-    def factory(loader, probe=("cpu", "CPU")):
-        app = ws.WhisperGUI(model_loader=loader, device_probe=lambda: probe)
+    def factory(loader, probe=("cpu", "CPU"), installer=None):
+        device_probe = probe if callable(probe) else (lambda: probe)
+        app = ws.WhisperGUI(model_loader=loader, device_probe=device_probe, gpu_installer=installer)
         app.withdraw()
         apps.append(app)
         return app

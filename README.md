@@ -22,9 +22,10 @@ Note:
 * Windows può mostrare l'avviso di SmartScreen perché l'eseguibile non è firmato: *Ulteriori informazioni → Esegui comunque*.
 
 ### ⚡ GPU NVIDIA (facoltativa)
-Con **Dispositivo: Automatico** il programma usa la GPU NVIDIA quando trova le librerie CUDA 12 (cuBLAS); altrimenti usa la CPU e lo scrive in basso a sinistra (es. *«CPU (GPU NVIDIA trovata, ma mancano le librerie CUDA 12 cuBLAS)»*). Per attivare la GPU basta una di queste:
-* installare il [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit-archive) **12.x**, dalla 12.8 in poi (la versione 13 non contiene le librerie CUDA 12);
-* copiare `cublas64_12.dll` e `cublasLt64_12.dll` nella stessa cartella di `WhisperStudio.exe` (si trovano nel pacchetto pip `nvidia-cublas-cu12`, cartella `nvidia/cublas/bin`).
+Con **Dispositivo: Automatico** il programma usa la GPU NVIDIA quando trova le librerie CUDA 12 (cuBLAS); altrimenti usa la CPU e lo scrive in basso a sinistra (es. *«CPU (GPU NVIDIA trovata, ma mancano le librerie CUDA 12 cuBLAS)»*). Per attivare la GPU:
+* **il modo più semplice:** premi **«Attiva GPU NVIDIA»** in basso a sinistra (compare solo se hai una scheda NVIDIA senza le librerie). Il programma scarica 527 MB da pypi.org (il pacchetto ufficiale NVIDIA `nvidia-cublas-cu12` 12.9.2.10), controlla che l'impronta SHA-256 sia esattamente quella attesa e installa le due librerie in `%LOCALAPPDATA%\WhisperStudio\cuda12` (circa 740 MB). La GPU si usa subito, senza riavviare; «Interrompi» ferma il download. Le librerie sono di NVIDIA e soggette alla sua licenza;
+* oppure installare il [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit-archive) **12.x**, dalla 12.8 in poi (la versione 13 non contiene le librerie CUDA 12);
+* oppure copiare `cublas64_12.dll` e `cublasLt64_12.dll` nella stessa cartella di `WhisperStudio.exe` (si trovano nel pacchetto pip `nvidia-cublas-cu12`, cartella `nvidia/cublas/bin`).
 
 Le schede RTX serie 50 richiedono cuBLAS 12.8 o successivo. Se la GPU dà errore (all'avvio del modello o durante il lavoro), in modalità Automatico il lavoro prosegue sulla CPU e il riepilogo finale lo segnala; per riprovare la GPU basta riavviare il programma.
 
@@ -40,7 +41,7 @@ Le schede RTX serie 50 richiedono cuBLAS 12.8 o successivo. Se la GPU dà errore
 * **Velocità vs Qualità:** `Fast`, `Balanced` e `Accurate` cambiano l'ampiezza della ricerca (beam size 1, 3, 5). Le parole non vengono scelte a caso: il campionamento interviene solo come ripiego sui pezzi che vengono male.
 * **Dispositivo:** Automatico, GPU (CUDA) o CPU.
 * **Avanzamento e ETA in tempo reale**, calcolati sul ritmo effettivo della trascrizione.
-* **100% Offline:** La trascrizione avviene sul tuo PC; i tuoi file non vengono inviati a nessun server esterno. Serve Internet solo per scaricare un modello la prima volta.
+* **100% Offline:** La trascrizione avviene sul tuo PC; i tuoi file non vengono inviati a nessun server esterno. Serve Internet solo per scaricare un modello la prima volta e, se lo chiedi con il pulsante, le librerie NVIDIA.
 
 ---
 

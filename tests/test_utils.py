@@ -330,3 +330,113 @@ def test_download_can_be_cancelled(fake_whisper):
     with pytest.raises(ws.DownloadCancelled):
         ws.load_model("medium", "cpu", "auto", on_download=lambda d, t: None, should_stop=lambda: True)
     assert fake_whisper.calls == [("medium", True)]  # il modello non viene aperto
+
+
+# ---------- pulsante "Attiva GPU NVIDIA": download verificato delle librerie cuBLAS ----------
+
+import hashlib  # noqa: E402
+import io  # noqa: E402
+import zipfile  # noqa: E402
+
+
+def make_fake_wheel(extra=None):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("nvidia/cublas/bin/cublas64_12.dll", b"MZ cublas")
+        z.writestr("nvidia/cublas/bin/cublasLt64_12.dll", b"MZ cublasLt")
+        z.writestr("nvidia/cublas/bin/nvblas64_12.dll", b"MZ nvblas")
+        for name, data in (extra or {}).items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+class FakeResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+@pytest.fixture
+def fake_pypi(tmp_path, monkeypatch):
+    """Finto download da PyPI: serve un finto pacchetto con l'impronta attesa, in una LOCALAPPDATA vuota."""
+    import urllib.request
+    wheel = make_fake_wheel()
+    state = {"body": wheel, "error": None, "requests": []}
+
+    def urlopen(req, timeout=None):
+        state["requests"].append(req.full_url)
+        if state["error"]:
+            raise state["error"]
+        return FakeResponse(state["body"])
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(ws, "CUBLAS_WHEEL_SHA256", hashlib.sha256(wheel).hexdigest())
+    monkeypatch.setattr(ws, "CUBLAS_WHEEL_SIZE", len(wheel))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
+    return state
+
+
+def installed_files(tmp_path):
+    root = tmp_path / "appdata"
+    return sorted(str(p.relative_to(root)).replace("\\", "/") for p in root.rglob("*") if p.is_file())
+
+
+def test_gpu_libraries_are_downloaded_verified_and_installed(fake_pypi, tmp_path):
+    progress = []
+    dest = ws.install_cuda_libraries(report=lambda d, t: progress.append((d, t)))
+    assert fake_pypi["requests"] == [ws.CUBLAS_WHEEL_URL]
+    assert ws.CUBLAS_WHEEL_URL.startswith("https://files.pythonhosted.org/")
+    assert dest == str(tmp_path / "appdata" / "WhisperStudio" / "cuda12")
+    # solo le due DLL, niente pacchetto scaricato ne' cartelle provvisorie
+    assert installed_files(tmp_path) == ["WhisperStudio/cuda12/cublas64_12.dll",
+                                         "WhisperStudio/cuda12/cublasLt64_12.dll"]
+    assert (tmp_path / "appdata/WhisperStudio/cuda12/cublasLt64_12.dll").read_bytes() == b"MZ cublasLt"
+    assert progress[-1] == (ws.CUBLAS_WHEEL_SIZE, ws.CUBLAS_WHEEL_SIZE)
+
+
+def test_gpu_libraries_with_the_wrong_fingerprint_are_not_installed(fake_pypi, tmp_path):
+    fake_pypi["body"] = make_fake_wheel(extra={"nvidia/cublas/bin/altro.dll": b"sorpresa"})
+    with pytest.raises(ws.GpuSetupError, match="non corrisponde"):
+        ws.install_cuda_libraries()
+    assert installed_files(tmp_path) == []
+
+
+def test_gpu_libraries_download_can_be_cancelled(fake_pypi, tmp_path):
+    with pytest.raises(ws.DownloadCancelled):
+        ws.install_cuda_libraries(should_stop=lambda: True)
+    assert installed_files(tmp_path) == []
+
+
+def test_gpu_libraries_network_error_is_explained(fake_pypi, tmp_path):
+    import urllib.error
+    fake_pypi["error"] = urllib.error.URLError("getaddrinfo failed")
+    with pytest.raises(ws.GpuSetupError, match="connessione"):
+        ws.install_cuda_libraries()
+    assert installed_files(tmp_path) == []
+
+
+def test_installed_gpu_libraries_are_found(no_cuda_env, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(no_cuda_env / "appdata"))
+    dll = fake_dll(no_cuda_env / "appdata" / "WhisperStudio" / "cuda12")
+    assert ws.find_cublas() == dll
+
+
+def test_leftovers_of_an_interrupted_install_are_cleaned(fake_pypi, tmp_path):
+    leftover = tmp_path / "appdata" / "WhisperStudio" / "cuda12-vecchio"
+    leftover.mkdir(parents=True)
+    (leftover / "cublas.whl").write_bytes(b"x" * 1000)  # es. finestra chiusa durante il download
+    ws.install_cuda_libraries()
+    assert installed_files(tmp_path) == ["WhisperStudio/cuda12/cublas64_12.dll",
+                                         "WhisperStudio/cuda12/cublasLt64_12.dll"]
+
+
+@pytest.mark.parametrize("done, total, expected", [
+    (0, 553162896, "0% (0 di 527 MB)"),
+    (276581448, 553162896, "50% (263 di 527 MB)"),
+    (551000000, 553162896, "99% (525 di 527 MB)"),   # mai 100% prima della fine
+    (553162896, 553162896, "100% (527 di 527 MB)"),
+])
+def test_download_progress_text(done, total, expected):
+    assert ws.progress_text(done, total) == expected

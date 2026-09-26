@@ -469,3 +469,93 @@ def test_turbo_cannot_translate_and_says_so(make_app, dialogs, media):
     assert dialogs.kinds() == ["showwarning"]
     assert "turbo" in dialogs.calls[0][2]
     assert loader.calls == []
+
+
+# ---------- pulsante "Attiva GPU NVIDIA" ----------
+
+def gpu_button_shown(app):
+    pump_for(app, 0.3)  # il rilevamento della GPU arriva dalla coda
+    return app.btn_gpu.winfo_manager() != ""
+
+
+@pytest.mark.parametrize("probe, shown", [
+    (("cpu", "CPU (GPU NVIDIA trovata, ma mancano le librerie CUDA 12 cuBLAS)"), True),
+    (("cuda", "GPU NVIDIA (CUDA)"), False),
+    (("cpu", "CPU (nessuna GPU NVIDIA trovata)"), False),
+])
+def test_gpu_button_only_when_the_nvidia_libraries_are_missing(make_app, probe, shown):
+    import trascrivi_locale as ws
+    assert probe[1] == ws.MISSING_CUBLAS or not shown
+    app = make_app(Loader({}), probe=probe)
+    assert gpu_button_shown(app) is shown
+
+
+def test_gpu_install_asks_before_downloading(make_app, dialogs):
+    import trascrivi_locale as ws
+    calls = []
+    app = make_app(Loader({}), probe=("cpu", ws.MISSING_CUBLAS), installer=lambda **kw: calls.append(kw))
+    assert gpu_button_shown(app)
+    dialogs.answer = False
+    app.btn_gpu.invoke()
+    pump_for(app, 0.3)
+    assert dialogs.kinds() == ["askyesno"]
+    assert "527" in dialogs.calls[0][2] and "NVIDIA" in dialogs.calls[0][2]
+    assert calls == []
+
+
+def test_gpu_install_shows_progress_and_activates_the_gpu(make_app, dialogs):
+    import trascrivi_locale as ws
+    state = {"probe": ("cpu", ws.MISSING_CUBLAS)}
+    gate = threading.Event()
+
+    def installer(report=None, should_stop=None):
+        report(0, 553162896)
+        report(276581448, 553162896)
+        gate.wait(10)
+        state["probe"] = ("cuda", "GPU NVIDIA (CUDA)")
+        return "C:/qualcosa/cuda12"
+
+    app = make_app(Loader({}), probe=lambda: state["probe"], installer=installer)
+    assert gpu_button_shown(app)
+    app.btn_gpu.invoke()
+    pump_until(app, lambda: "50%" in app.lbl_status.cget("text"), timeout=15)
+    assert str(app.btn_start.cget("state")) == "disabled"  # niente trascrizioni durante l'installazione
+    gate.set()
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert dialogs.kinds() == ["askyesno", "showinfo"]
+    assert "GPU NVIDIA (CUDA)" in app.accel_label_var.get()
+    assert not gpu_button_shown(app)
+
+
+def test_gpu_install_error_is_shown(make_app, dialogs):
+    import trascrivi_locale as ws
+
+    def installer(report=None, should_stop=None):
+        raise ws.GpuSetupError("Download non riuscito: controlla la connessione e riprova.")
+
+    app = make_app(Loader({}), probe=("cpu", ws.MISSING_CUBLAS), installer=installer)
+    app.btn_gpu.invoke()
+    pump_until(app, lambda: is_idle(app) and len(dialogs.calls) == 2, timeout=15)
+    assert dialogs.kinds() == ["askyesno", "showerror"]
+    assert "connessione" in dialogs.calls[1][2]
+    assert gpu_button_shown(app)  # si puo' riprovare
+
+
+def test_gpu_install_can_be_cancelled(make_app, dialogs):
+    import time
+    import trascrivi_locale as ws
+
+    def installer(report=None, should_stop=None):
+        for i in range(500):
+            if should_stop():
+                raise ws.DownloadCancelled()
+            report(i, 500)
+            time.sleep(0.02)
+
+    app = make_app(Loader({}), probe=("cpu", ws.MISSING_CUBLAS), installer=installer)
+    app.btn_gpu.invoke()
+    pump_until(app, lambda: "%" in app.lbl_status.cget("text"), timeout=15)
+    app.btn_stop.invoke()
+    pump_until(app, lambda: is_idle(app) and len(dialogs.calls) == 2, timeout=15)
+    assert dialogs.kinds() == ["askyesno", "showinfo"]
+    assert "annullat" in dialogs.calls[1][2].lower()

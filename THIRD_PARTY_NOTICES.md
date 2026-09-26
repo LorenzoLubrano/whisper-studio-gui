@@ -2,6 +2,8 @@
 
 `WhisperStudio.exe` (release) contiene, oltre al codice di questo repository, i componenti elencati qui sotto con le rispettive licenze. Le versioni sono quelle usate per la release V1.1. Il codice sorgente completo di Whisper Studio e la ricetta di build (`WhisperStudio.spec`) sono in questo repository; i sorgenti dei componenti sono disponibili agli indirizzi indicati.
 
+Le librerie NVIDIA cuBLAS (`cublas64_12.dll`, `cublasLt64_12.dll`) **non** sono incluse: le scarica l'utente, solo se preme «Attiva GPU NVIDIA», dal pacchetto ufficiale [`nvidia-cublas-cu12` 12.9.2.10](https://pypi.org/project/nvidia-cublas-cu12/12.9.2.10/) su PyPI, con licenza proprietaria NVIDIA (NVIDIA Software License Agreement).
+
 I modelli Whisper **non** sono inclusi: vengono scaricati al primo utilizzo da Hugging Face (conversioni Systran dei modelli OpenAI Whisper, licenza MIT).
 
 ## Motore di trascrizione
