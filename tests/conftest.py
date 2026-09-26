@@ -1,7 +1,6 @@
 import gc
 import os
 import sys
-import threading
 import time
 import types
 
@@ -30,20 +29,24 @@ def make_info(duration):
 class FakeModel:
     """Sostituto di WhisperModel: stessa interfaccia usata dall'app (transcribe + model.device)."""
 
-    def __init__(self, device, segments=(), duration=10.0, error=None, gate=None):
+    def __init__(self, device, segments=(), duration=10.0, error=None, gate=None, error_for=None):
         self.model = types.SimpleNamespace(device=device, compute_type="float32")
         self._segments = list(segments)
         self._duration = duration
         self._error = error
-        self._gate = gate  # threading.Event: se c'e', si ferma dopo il primo segmento finche' non viene impostato
+        self._error_for = error_for or {}  # {nome file: eccezione}: fallisce solo su quei file
+        self._gate = gate  # threading.Event: se c'e', si ferma (prima dell'errore o dopo il 1o segmento) finche' non viene impostato
         self.calls = []
 
     def transcribe(self, path, **kwargs):
         self.calls.append((path, kwargs))
+        error = self._error_for.get(os.path.basename(path), self._error)
 
         def gen():
-            if self._error is not None:
-                raise self._error
+            if error is not None:
+                if self._gate is not None:
+                    self._gate.wait(10)
+                raise error
             for i, seg in enumerate(self._segments):
                 if i == 1 and self._gate is not None:
                     self._gate.wait(10)
@@ -59,10 +62,10 @@ class Loader:
         self.by_device = by_device
         self.calls = []
 
-    def __call__(self, name, device, compute_type):
+    def __call__(self, name, device, compute_type, on_download=None):
         self.calls.append((name, device, compute_type))
         model = self.by_device[device]
-        if isinstance(model, Exception):
+        if isinstance(model, BaseException):
             raise model
         return model
 
@@ -142,9 +145,10 @@ def is_idle(app):
 @pytest.fixture
 def media(tmp_path):
     """Un file 'media' qualsiasi: con FakeModel il contenuto non viene letto."""
-    p = tmp_path / "intervista.mp3"
+    return make_media(tmp_path, "intervista.mp3")
+
+
+def make_media(folder, name):
+    p = folder / name
     p.write_bytes(b"\x00" * 16)
     return str(p)
-
-
-__all__ = ["FakeModel", "Loader", "make_segment", "pump_until", "pump_for", "is_idle", "threading"]

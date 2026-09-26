@@ -1,8 +1,11 @@
 """Test della finestra vera (Tk) con un modello finto al posto di Whisper."""
 import os
 import threading
+import tkinter as tk
 
-from conftest import FakeModel, Loader, is_idle, make_segment, pump_for, pump_until
+import pytest
+
+from conftest import FakeModel, Loader, is_idle, make_media, make_segment, pump_for, pump_until
 
 TWO_SEGS = [make_segment(0.0, 2.0, " Prima frase.", 1), make_segment(2.0, 4.0, " Seconda frase.", 2)]
 
@@ -41,6 +44,7 @@ def test_auto_falls_back_to_cpu_when_gpu_fails_during_transcription(make_app, di
     pump_until(app, lambda: is_idle(app), timeout=15)
     assert [c[1] for c in loader.calls] == ["cuda", "cpu"]
     assert dialogs.kinds() == ["showinfo"]
+    assert "CPU" in dialogs.calls[-1][2]  # l'utente deve sapere che la GPU non ha funzionato
     with open(os.path.splitext(media)[0] + ".txt", encoding="utf-8") as f:
         assert f.read() == "Prima frase. Seconda frase.\n"
 
@@ -156,8 +160,6 @@ def test_closing_the_window_cancels_the_event_poll(make_app):
     assert not any("_poll_events" in s for s in scripts)
 
 
-import pytest  # noqa: E402
-
 
 @pytest.mark.parametrize("preset, beam", [("Fast", 1), ("Balanced", 3), ("Accurate", 5)])
 def test_presets_decode_deterministically(make_app, dialogs, media, preset, beam):
@@ -182,3 +184,134 @@ def test_event_poll_survives_a_failing_handler(make_app):
     pump_until(app, lambda: app.lbl_status.cget("text") == "evento successivo", timeout=3)
     app._post("_set_status", "ancora vivo")
     pump_until(app, lambda: app.lbl_status.cget("text") == "ancora vivo", timeout=3)
+
+
+CUBLAS_MISSING = RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+
+
+def test_batch_continues_after_a_broken_file_and_reports_it(make_app, dialogs, tmp_path):
+    files = [make_media(tmp_path, n) for n in ("a.mp3", "b.mp3", "c.mp3")]
+    model = FakeModel("cpu", segments=TWO_SEGS, duration=4.0,
+                      error_for={"b.mp3": ValueError("Invalid data found when processing input")})
+    app = make_app(Loader({"cpu": model}))
+    start_with(app, files)
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert (tmp_path / "a.txt").exists() and (tmp_path / "c.txt").exists()
+    assert not (tmp_path / "b.txt").exists()
+    assert dialogs.kinds() == ["showwarning"]
+    assert "b.mp3" in dialogs.calls[0][2] and "Invalid data found" in dialogs.calls[0][2]
+
+
+def test_missing_file_is_reported_while_the_others_are_done(make_app, dialogs, tmp_path):
+    ok = make_media(tmp_path, "ok.mp3")
+    gone = str(tmp_path / "sparito.mp3")
+    app = make_app(Loader({"cpu": FakeModel("cpu", segments=TWO_SEGS, duration=4.0)}))
+    start_with(app, [ok, gone])
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert (tmp_path / "ok.txt").exists()
+    assert dialogs.kinds() == ["showwarning"]
+    assert "sparito.mp3" in dialogs.calls[0][2]
+
+
+def test_files_that_would_write_the_same_outputs_are_refused(make_app, dialogs, tmp_path):
+    files = [make_media(tmp_path, "lezione.mp4"), make_media(tmp_path, "lezione.m4a")]
+    loader = Loader({"cpu": FakeModel("cpu", segments=TWO_SEGS)})
+    app = make_app(loader)
+    start_with(app, files)
+    pump_for(app, 0.3)
+    assert dialogs.kinds() == ["showwarning"]
+    assert "lezione.mp4" in dialogs.calls[0][2] and "lezione.m4a" in dialogs.calls[0][2]
+    assert loader.calls == []
+
+
+def test_after_a_gpu_failure_auto_stays_on_cpu_for_the_session(make_app, dialogs, media):
+    gpu = FakeModel("cuda", error=CUBLAS_MISSING)
+    loader = Loader({"cuda": gpu, "cpu": FakeModel("cpu", segments=TWO_SEGS, duration=4.0)})
+    app = make_app(loader, probe=("cuda", "GPU NVIDIA (CUDA)"))
+    start_with(app, [media])
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    app.btn_start.invoke()  # i file di output ora esistono: la conferma risponde si'
+    pump_until(app, lambda: is_idle(app) and len(loader.calls) == 3, timeout=15)
+    assert [c[1] for c in loader.calls] == ["cuda", "cpu", "cpu"]
+
+
+def test_after_a_gpu_failure_explicit_gpu_asks_to_restart(make_app, dialogs, media):
+    gpu = FakeModel("cuda", error=CUBLAS_MISSING)
+    loader = Loader({"cuda": gpu, "cpu": FakeModel("cpu", segments=TWO_SEGS, duration=4.0)})
+    app = make_app(loader, probe=("cuda", "GPU NVIDIA (CUDA)"))
+    start_with(app, [media])
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    app.device_choice.set("GPU (CUDA)")
+    app.btn_start.invoke()
+    pump_until(app, lambda: is_idle(app) and dialogs.kinds()[-1] == "showerror", timeout=15)
+    assert "riavvia" in dialogs.calls[-1][2].lower()
+    assert [c[1] for c in loader.calls] == ["cuda", "cpu"]
+
+
+def test_auto_falls_back_to_cpu_when_the_gpu_model_cannot_load(make_app, dialogs, media):
+    loader = Loader({"cuda": RuntimeError("CUDA failed with error out of memory"),
+                     "cpu": FakeModel("cpu", segments=TWO_SEGS, duration=4.0)})
+    app = make_app(loader, probe=("cuda", "GPU NVIDIA (CUDA)"))
+    start_with(app, [media])
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert [c[1] for c in loader.calls] == ["cuda", "cpu"]
+    assert dialogs.kinds() == ["showinfo"]
+    assert "CPU" in dialogs.calls[0][2]
+    assert os.path.exists(os.path.splitext(media)[0] + ".txt")
+
+
+def test_cancel_before_the_gpu_fallback_does_not_load_the_cpu_model(make_app, dialogs, media):
+    gate = threading.Event()
+    gpu = FakeModel("cuda", error=CUBLAS_MISSING, gate=gate)
+    loader = Loader({"cuda": gpu, "cpu": FakeModel("cpu", segments=TWO_SEGS)})
+    app = make_app(loader, probe=("cuda", "GPU NVIDIA (CUDA)"))
+    start_with(app, [media])
+    pump_until(app, lambda: gpu.calls, timeout=15)
+    app.btn_stop.invoke()
+    gate.set()
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert [c[1] for c in loader.calls] == ["cuda"]
+    assert dialogs.kinds() == ["showinfo"] and "annullat" in dialogs.calls[0][2].lower()
+
+
+def test_unexpected_error_in_the_window_is_shown(make_app, dialogs):
+    app = make_app(Loader({}))
+    app._post("_set_status", 1, 2, 3)  # TypeError dentro il gestore
+    pump_until(app, lambda: "showerror" in dialogs.kinds(), timeout=3)
+
+
+# il thread di lavoro termina con SystemExit apposta: pytest lo segnalerebbe come avviso
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_worker_crash_still_ends_the_job(make_app, dialogs, media):
+    app = make_app(Loader({"cpu": SystemExit()}))
+    start_with(app, [media])
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert dialogs.kinds() == ["showerror"]
+
+
+def test_closing_while_running_asks_and_stops(make_app, dialogs, media):
+    gate = threading.Event()
+    model = FakeModel("cpu", segments=TWO_SEGS, duration=4.0, gate=gate)
+    app = make_app(Loader({"cpu": model}))
+    start_with(app, [media])
+    pump_until(app, lambda: model.calls, timeout=15)
+    dialogs.answer = False
+    app._on_close()
+    assert app.winfo_exists()
+    assert not app.stop_requested.is_set()
+    dialogs.answer = True
+    app._on_close()
+    gate.set()
+    assert app.stop_requested.is_set()
+    with pytest.raises(tk.TclError):
+        app.winfo_exists()
+    assert dialogs.kinds() == ["askyesno", "askyesno"]
+
+
+def test_language_code_is_normalised(make_app, dialogs, media):
+    model = FakeModel("cpu", segments=TWO_SEGS, duration=4.0)
+    app = make_app(Loader({"cpu": model}))
+    app.language.set(" IT ")
+    start_with(app, [media])
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert model.calls[0][1]["language"] == "it"

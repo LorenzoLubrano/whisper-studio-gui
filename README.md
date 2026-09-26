@@ -23,10 +23,10 @@ Note:
 
 ### ⚡ GPU NVIDIA (facoltativa)
 Con **Dispositivo: Automatico** il programma usa la GPU NVIDIA quando trova le librerie CUDA 12 (cuBLAS); altrimenti usa la CPU e lo scrive in basso a sinistra (es. *«CPU (GPU NVIDIA trovata, ma mancano le librerie CUDA 12 cuBLAS)»*). Per attivare la GPU basta una di queste:
-* installare il [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) 12.8 o successivo;
+* installare il [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit-archive) **12.x**, dalla 12.8 in poi (la versione 13 non contiene le librerie CUDA 12);
 * copiare `cublas64_12.dll` e `cublasLt64_12.dll` nella stessa cartella di `WhisperStudio.exe` (si trovano nel pacchetto pip `nvidia-cublas-cu12`, cartella `nvidia/cublas/bin`).
 
-Le schede RTX serie 50 richiedono cuBLAS 12.8 o successivo. Se la GPU dà errore durante il lavoro, in modalità Automatico il file viene rielaborato sulla CPU.
+Le schede RTX serie 50 richiedono cuBLAS 12.8 o successivo. Se la GPU dà errore (all'avvio del modello o durante il lavoro), in modalità Automatico il lavoro prosegue sulla CPU e il riepilogo finale lo segnala; per riprovare la GPU basta riavviare il programma.
 
 ---
 
@@ -34,10 +34,10 @@ Le schede RTX serie 50 richiedono cuBLAS 12.8 o successivo. Se la GPU dà errore
 
 * **Interfaccia Moderna:** UI pulita e professionale basata su `tkinter` e `ttk` con tema chiaro.
 * **Supporto Multimediale:** Compatibile con file video (`.mp4`, `.mkv`, `.mov`, `.avi`) e audio (`.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`).
-* **Batch Processing:** Carica più file contemporaneamente e lasciali elaborare in coda in modo completamente automatico.
-* **Formati di Output Multipli:** Scegli tra `.txt` (Testo semplice), `.srt` (Sottotitoli standard), `.vtt` (Sottotitoli Web) e `.segments.txt` (Testo con timestamp). I file vengono salvati accanto all'originale, con lo stesso nome; se esistono già, il programma chiede prima di sovrascriverli.
+* **Batch Processing:** Carica più file contemporaneamente e lasciali elaborare in coda in modo completamente automatico. Se un file non si può leggere, gli altri vengono elaborati comunque e alla fine un riepilogo dice cosa non è andato.
+* **Formati di Output Multipli:** Scegli tra `.txt` (Testo semplice), `.srt` (Sottotitoli standard), `.vtt` (Sottotitoli Web) e `.segments.txt` (Testo con timestamp). I file vengono salvati accanto all'originale, con lo stesso nome; se esistono già, il programma chiede prima di sovrascriverli. File con lo stesso nome (es. `lezione.mp4` e `lezione.m4a`) vengono segnalati prima di iniziare, perché uno cancellerebbe la trascrizione dell'altro.
 * **Modelli Flessibili:** Scegli la "taglia" del modello AI in base alle tue esigenze (es. `tiny` per la massima velocità, `large-v3` per la massima precisione).
-* **Velocità vs Qualità:** `Fast`, `Balanced` e `Accurate` cambiano l'ampiezza della ricerca (beam size 1, 3, 5); il risultato è sempre lo stesso a parità di file.
+* **Velocità vs Qualità:** `Fast`, `Balanced` e `Accurate` cambiano l'ampiezza della ricerca (beam size 1, 3, 5). Le parole non vengono scelte a caso: il campionamento interviene solo come ripiego sui pezzi che vengono male.
 * **Dispositivo:** Automatico, GPU (CUDA) o CPU.
 * **Avanzamento e ETA in tempo reale**, calcolati sul ritmo effettivo della trascrizione.
 * **100% Offline:** La trascrizione avviene sul tuo PC; i tuoi file non vengono inviati a nessun server esterno. Serve Internet solo per scaricare un modello la prima volta.
@@ -73,3 +73,8 @@ pip install -r requirements-dev.txt
 pyinstaller WhisperStudio.spec
 ```
 Il file viene creato in `dist\WhisperStudio.exe`.
+
+---
+
+## 📄 Componenti di terzi
+L'eseguibile include librerie di terzi (faster-whisper, CTranslate2, ONNX Runtime, PyAV/FFmpeg e altre) con le rispettive licenze: l'elenco completo è in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

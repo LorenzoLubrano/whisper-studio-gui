@@ -102,6 +102,7 @@ def test_resolve_device_cpu_does_not_probe():
     (RuntimeError("cuDNN failed with status CUDNN_STATUS_NOT_INITIALIZED"), True),
     (RuntimeError("parallel_for failed: cudaErrorNoKernelImageForDevice"), True),
     (ValueError("Invalid data found when processing input"), False),
+    (ValueError("Invalid data found when processing input: 'D:/video/barracuda.mp3'"), False),
 ])
 def test_is_cuda_error(error, expected):
     assert ws.is_cuda_error(error) is expected
@@ -126,3 +127,111 @@ def test_cuda_library_dirs_skip_missing_folders(tmp_path, monkeypatch):
 ])
 def test_compute_type_for_device(device, requested, expected):
     assert ws.compute_type_for(device, requested) == expected
+
+
+
+def test_failed_write_keeps_the_previous_file(tmp_path):
+    media = tmp_path / "a.mp3"
+    media.write_bytes(b"")
+    srt = tmp_path / "a.srt"
+    srt.write_text("vecchio", encoding="utf-8")
+    broken = [{"start": 0.0, "end": 1.0, "text": "ok"}, {"start": 1.0, "end": 2.0, "text": None}]
+    cfg = {"save_txt": False, "save_srt": True, "save_vtt": False, "save_txt_seg": False}
+    with pytest.raises(AttributeError):
+        ws.write_outputs(str(media), broken, cfg)
+    assert srt.read_text(encoding="utf-8") == "vecchio"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.mp3", "a.srt"]
+
+
+# ---------- ricerca di cuBLAS: solo percorsi completi da cartelle note, mai la cartella corrente ----------
+
+needs_windows = pytest.mark.skipif(os.name != "nt", reason="nomi delle DLL di Windows")
+
+
+@pytest.fixture
+def no_cuda_env(tmp_path, monkeypatch):
+    empty = tmp_path / "programma"
+    empty.mkdir()
+    monkeypatch.setattr(ws, "APP_DIR", str(empty))
+    monkeypatch.setenv("PATH", "")
+    for k in list(os.environ):
+        if k.upper().startswith("CUDA_PATH"):
+            monkeypatch.delenv(k)
+    return tmp_path
+
+
+def fake_dll(folder):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "cublas64_12.dll").write_bytes(b"MZ")
+    return str(folder / "cublas64_12.dll")
+
+
+@needs_windows
+def test_find_cublas_in_versioned_cuda_path(no_cuda_env, monkeypatch):
+    dll = fake_dll(no_cuda_env / "CUDA" / "v12.8" / "bin")
+    monkeypatch.setenv("CUDA_PATH_V12_8", str(no_cuda_env / "CUDA" / "v12.8"))
+    assert ws.find_cublas() == dll
+
+
+@needs_windows
+def test_find_cublas_next_to_the_program(no_cuda_env, monkeypatch):
+    dll = fake_dll(no_cuda_env / "programma")
+    assert ws.find_cublas() == dll
+
+
+@needs_windows
+def test_find_cublas_in_path(no_cuda_env, monkeypatch):
+    dll = fake_dll(no_cuda_env / "libs")
+    monkeypatch.setenv("PATH", str(no_cuda_env / "libs"))
+    assert ws.find_cublas() == dll
+
+
+@needs_windows
+def test_find_cublas_ignores_the_current_directory(no_cuda_env, monkeypatch):
+    fake_dll(no_cuda_env / "download")
+    monkeypatch.chdir(no_cuda_env / "download")
+    assert ws.find_cublas() is None
+
+
+def test_cuda_status_without_nvidia_gpu(monkeypatch):
+    import ctranslate2
+    monkeypatch.setattr(ctranslate2, "get_cuda_device_count", lambda: 0)
+    device, description = ws.cuda_status()
+    assert device == "cpu"
+    assert "nessuna GPU NVIDIA" in description
+
+
+# ---------- modelli: prima dal disco, download solo se mancano ----------
+
+class FakeWhisperModel:
+    cached = set()
+    calls = []
+
+    def __init__(self, name, device="auto", compute_type="default", local_files_only=False, **kw):
+        from huggingface_hub.utils import LocalEntryNotFoundError
+        FakeWhisperModel.calls.append((name, local_files_only))
+        if local_files_only and name not in FakeWhisperModel.cached:
+            raise LocalEntryNotFoundError("non in cache")
+
+
+@pytest.fixture
+def fake_whisper(monkeypatch):
+    import faster_whisper
+    FakeWhisperModel.cached = {"small"}
+    FakeWhisperModel.calls = []
+    monkeypatch.setattr(faster_whisper, "WhisperModel", FakeWhisperModel)
+    return FakeWhisperModel
+
+
+def test_cached_model_is_loaded_without_network(fake_whisper):
+    downloads = []
+    ws.load_model("small", "cpu", "auto", on_download=lambda: downloads.append(1))
+    assert fake_whisper.calls == [("small", True)]
+    assert downloads == []
+
+
+def test_missing_model_is_downloaded_and_the_user_is_told(fake_whisper):
+    downloads = []
+    ws.load_model("medium", "cpu", "auto", on_download=lambda: downloads.append(1))
+    assert fake_whisper.calls == [("medium", True), ("medium", False)]
+    assert downloads == [1]

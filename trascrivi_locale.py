@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import queue
@@ -8,8 +9,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk
 
-# L'audio resta sul PC; con questa variabile anche la libreria dei modelli non invia statistiche d'uso
+# L'audio resta sul PC; la libreria dei modelli non invia statistiche d'uso
+# ne' un eventuale token Hugging Face salvato sul PC (i modelli usati sono pubblici)
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 
 # =======================
 #   UTILS
@@ -63,19 +66,31 @@ def output_paths(media_path: str, cfg: dict) -> list:
         paths.append(f"{base}.vtt")
     return paths
 
+def write_txt(segments, out_path):
+    full_text = "".join(seg["text"] for seg in segments).strip()
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(full_text + "\n")
+
 def write_outputs(media_path: str, segments: list, cfg: dict) -> list:
     outs = output_paths(media_path, cfg)
     for p in outs:
         if p.endswith(".segments.txt"):
-            write_txt_segmented(segments, p)
+            writer = write_txt_segmented
         elif p.endswith(".txt"):
-            full_text = "".join(seg["text"] for seg in segments).strip()
-            with open(p, "w", encoding="utf-8") as f:
-                f.write(full_text + "\n")
+            writer = write_txt
         elif p.endswith(".srt"):
-            write_srt(segments, p)
+            writer = write_srt
         else:
-            write_vtt(segments, p)
+            writer = write_vtt
+        # prima su un file temporaneo, poi sostituzione in un colpo solo:
+        # un errore o una chiusura a meta' non lasciano un file troncato
+        tmp = p + ".tmp"
+        try:
+            writer(segments, tmp)
+            os.replace(tmp, p)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
     return outs
 
 def hhmmss(secs: float) -> str:
@@ -95,14 +110,17 @@ def estimate_eta(elapsed: float, processed: float, total: float):
 #   GPU / DISPOSITIVO
 # =======================
 
-_dll_dir_handles = []  # vanno tenuti in vita, altrimenti Windows toglie le cartelle aggiunte
+CUBLAS_DLL = "cublas64_12.dll"
+_cublas_module = None  # tenuto in vita: CTranslate2 riusa questo modulo gia' caricato
 
 def cuda_library_dirs() -> list:
-    """Cartelle in cui cercare le librerie CUDA 12 (cuBLAS) necessarie alla GPU."""
+    """Cartelle note in cui cercare le librerie CUDA 12 (cuBLAS). Mai la cartella corrente."""
     dirs = [APP_DIR]
-    cuda_path = os.environ.get("CUDA_PATH")
-    if cuda_path:
-        dirs.append(os.path.join(cuda_path, "bin"))
+    # CUDA Toolkit: CUDA_PATH e le varianti per versione (CUDA_PATH_V12_8, ...)
+    for key, value in sorted(os.environ.items()):
+        k = key.upper()
+        if k == "CUDA_PATH" or k.startswith("CUDA_PATH_V12"):
+            dirs.append(os.path.join(value, "bin"))
     # pacchetti pip nvidia-cublas-cu12 / nvidia-cudnn-cu12 (vedi requirements-gpu.txt)
     try:
         import importlib.util
@@ -112,31 +130,29 @@ def cuda_library_dirs() -> list:
                 dirs.append(os.path.join(loc, "bin"))
     except Exception:
         pass
+    dirs += os.environ.get("PATH", "").split(os.pathsep)
     found = []
     for d in dirs:
-        if os.path.isdir(d) and d not in found:
+        # solo percorsi assoluti: una voce "." nel PATH vorrebbe dire la cartella corrente
+        if d and os.path.isabs(d) and os.path.isdir(d) and d not in found:
             found.append(d)
     return found
 
-def enable_cuda_libraries():
+def find_cublas():
+    """Percorso completo di cublas64_12.dll nelle cartelle note, oppure None."""
     for d in cuda_library_dirs():
-        if hasattr(os, "add_dll_directory"):
-            try:
-                _dll_dir_handles.append(os.add_dll_directory(d))
-            except OSError:
-                pass
-        path = os.environ.get("PATH", "")
-        if d not in path.split(os.pathsep):
-            os.environ["PATH"] = d + os.pathsep + path
+        path = os.path.join(d, CUBLAS_DLL)
+        if os.path.isfile(path):
+            return path
+    return None
 
-def _cublas_loadable() -> bool:
+def _load_cublas(path: str) -> bool:
+    global _cublas_module
     import ctypes
     try:
-        if os.name == "nt":
-            # winmode=0: stessa ricerca (PATH compreso) che usa CTranslate2 per caricare cuBLAS
-            ctypes.WinDLL("cublas64_12.dll", winmode=0)
-        else:
-            ctypes.CDLL("libcublas.so.12")
+        # con il percorso completo Windows cerca le dipendenze (cublasLt) nella stessa cartella
+        # e non nella cartella corrente; il PATH non viene toccato
+        _cublas_module = ctypes.WinDLL(path)
         return True
     except OSError:
         return False
@@ -146,11 +162,18 @@ def cuda_status():
     try:
         import ctranslate2
         if ctranslate2.get_cuda_device_count() == 0:
-            return "cpu", "CPU"
+            return "cpu", "CPU (nessuna GPU NVIDIA trovata)"
     except Exception:
         return "cpu", "CPU"
-    enable_cuda_libraries()
-    if not _cublas_loadable():
+    if os.name != "nt":
+        import ctypes
+        try:
+            ctypes.CDLL("libcublas.so.12")
+            return "cuda", "GPU NVIDIA (CUDA)"
+        except OSError:
+            return "cpu", "CPU (GPU NVIDIA trovata, ma mancano le librerie CUDA 12 cuBLAS)"
+    path = find_cublas()
+    if path is None or not _load_cublas(path):
         return "cpu", "CPU (GPU NVIDIA trovata, ma mancano le librerie CUDA 12 cuBLAS)"
     return "cuda", "GPU NVIDIA (CUDA)"
 
@@ -163,9 +186,14 @@ def resolve_device(requested: str, probe=cuda_status) -> str:
                            "Scegli «Automatico» o «CPU» in Dispositivo.")
     return device
 
-def is_cuda_error(err: Exception) -> bool:
-    text = str(err).lower()
-    return any(k in text for k in ("cuda", "cublas", "cudnn"))
+_CUDA_ERROR = re.compile(r"\bcu(?:da|blas|dnn)", re.IGNORECASE)
+
+def is_cuda_error(err: BaseException) -> bool:
+    # \b: "barracuda.mp3" in un messaggio non e' un errore della GPU
+    return bool(_CUDA_ERROR.search(str(err)))
+
+def describe(err: BaseException) -> str:
+    return str(err) or type(err).__name__
 
 def compute_type_for(device: str, requested: str) -> str:
     # float16 non e' disponibile su CPU: CTranslate2 rifiuterebbe il modello
@@ -173,13 +201,15 @@ def compute_type_for(device: str, requested: str) -> str:
         return "auto"
     return requested
 
-def load_model(name: str, device: str, compute_type: str):
+def load_model(name: str, device: str, compute_type: str, on_download=None):
     from faster_whisper import WhisperModel
     from huggingface_hub.utils import LocalEntryNotFoundError
     try:
         # prima dal disco: niente rete se il modello e' gia' stato scaricato
         return WhisperModel(name, device=device, compute_type=compute_type, local_files_only=True)
     except LocalEntryNotFoundError:
+        if on_download:
+            on_download()
         return WhisperModel(name, device=device, compute_type=compute_type)
 
 # =======================
@@ -243,12 +273,17 @@ class WhisperGUI(tk.Tk):
         self.file_done_sec  = 0.0
         self.output_dir     = None
 
+        # Motivo dell'errore GPU, se c'e' stato: per il resto della sessione non si riprova la GPU,
+        # perche' dopo un errore CUDA una nuova chiamata puo' bloccarsi dentro CTranslate2
+        self._cuda_failed = None
+
         # Il lavoro in background non tocca mai Tk: manda eventi su questa coda
         self._events = queue.Queue()
 
         self.accel_label_var = tk.StringVar(value="Acceleratore: rilevamento...")
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._detect_accelerator()
         self._poll_id = self.after(100, self._poll_events)
 
@@ -630,7 +665,17 @@ class WhisperGUI(tk.Tk):
         eta = estimate_eta(time.time() - self.file_start, self.file_done_sec, self.file_total_sec)
         self.lbl_eta.config(text="ETA: calcolo..." if eta is None else f"ETA: {hhmmss(eta)}")
 
-    def _file_done(self, idx, total):
+    def _begin_file(self, status):
+        # nuovo file: niente percentuale ne' ETA del file precedente finche' non parte la trascrizione
+        self.lbl_status.config(text=status)
+        self.file_start = None
+        self.file_total_sec = 0.0
+        self.progress.config(mode="indeterminate", value=0)
+        self.progress.start(10)
+        self.lbl_eta.config(text="--:--:--")
+
+    def _file_done(self, idx, total, out_dir):
+        self.output_dir = out_dir
         self.btn_open.config(state="normal")
         self.lbl_status.config(text=f"Completato file {idx} di {total}.")
 
@@ -645,7 +690,7 @@ class WhisperGUI(tk.Tk):
             "files": list(self.files_selected),
             "model_name": self.model_name.get(),
             "task": self.task.get(),
-            "language": (self.language.get().strip() or None),
+            "language": (self.language.get().strip().lower() or None),
             "compute_type": self.compute_type.get() or "auto",
             "device": DEVICE_CHOICES.get(self.device_choice.get(), "auto"),
             "preset": self.speed_preset.get(),
@@ -657,6 +702,20 @@ class WhisperGUI(tk.Tk):
 
         if not output_paths("x", cfg):
             messagebox.showwarning("Nessun formato", "Scegli almeno un formato di output da salvare.")
+            return
+
+        # es. lezione.mp4 e lezione.m4a scriverebbero entrambi lezione.txt: il secondo cancellerebbe il primo
+        owners = {}
+        for f in cfg["files"]:
+            for p in output_paths(f, cfg):
+                owners.setdefault(os.path.normcase(os.path.abspath(p)), []).append(os.path.basename(f))
+        clashes = sorted({tuple(names) for names in owners.values() if len(names) > 1})
+        if clashes:
+            lines = "\n".join(" e ".join(c) for c in clashes)
+            messagebox.showwarning(
+                "Nomi in conflitto",
+                f"Questi file salverebbero la trascrizione con lo stesso nome e uno cancellerebbe l'altro:\n\n"
+                f"{lines}\n\nRinominane uno oppure elaborali in due volte.")
             return
 
         existing = [p for f in cfg["files"] for p in output_paths(f, cfg) if os.path.exists(p)]
@@ -680,17 +739,65 @@ class WhisperGUI(tk.Tk):
         self.stop_requested.set()
         self.lbl_status.config(text="Interruzione in corso...", foreground=self.COL_ERROR)
 
+    def _on_close(self):
+        if self.running:
+            if not messagebox.askyesno(
+                    "Chiudere Whisper Studio?",
+                    "C'è un'elaborazione in corso: il file in corso non verrà salvato.\n\nChiudere comunque?"):
+                return
+            self.stop_requested.set()
+        self.destroy()
+
+    def report_callback_exception(self, exc, val, tb):
+        # nell'exe senza console stderr non esiste: l'errore va mostrato in una finestra
+        import traceback
+        if sys.stderr:
+            traceback.print_exception(exc, val, tb)
+        try:
+            messagebox.showerror("Errore imprevisto", f"{exc.__name__}: {val}")
+        except Exception:
+            pass
+
     # ---------- CORE LOGIC (thread in background: comunica solo con _post) ----------
     def _run(self, cfg):
+        ended = False
         try:
             self._process(cfg)
+            ended = True
         except Exception as err:
             # il messaggio viene calcolato qui: `err` non esiste piu' fuori da questo blocco
-            self._post("_finish_with_error", str(err) or type(err).__name__)
+            self._post("_finish_with_error", describe(err))
+            ended = True
+        finally:
+            if not ended:  # anche un'uscita anomala del thread deve sbloccare la finestra
+                self._post("_finish_with_error", "L'elaborazione si è interrotta in modo imprevisto.")
+
+    def _can_fall_back(self, cfg, device, err) -> bool:
+        return cfg["device"] == "auto" and device == "cuda" and is_cuda_error(err)
+
+    def _gpu_failed(self, err) -> str:
+        self._cuda_failed = describe(err).splitlines()[-1]
+        self._post("_set_accel_label", "Acceleratore: CPU (la GPU ha dato errore: si riprova al prossimo avvio)")
+        return f"la GPU ha dato errore ({self._cuda_failed}): il lavoro è stato fatto sulla CPU."
 
     def _process(self, cfg):
-        device = resolve_device(cfg["device"], self._device_probe)
-        model = self._load(cfg, device)
+        gpu_note = None
+        if cfg["device"] != "cpu" and self._cuda_failed:
+            if cfg["device"] == "cuda":
+                raise RuntimeError(f"La GPU ha già dato errore in questa sessione:\n{self._cuda_failed}\n\n"
+                                   "Chiudi e riavvia Whisper Studio per riprovarla, "
+                                   "oppure scegli «Automatico» o «CPU» in Dispositivo.")
+            device = "cpu"
+        else:
+            device = resolve_device(cfg["device"], self._device_probe)
+        try:
+            model = self._load(cfg, device)
+        except Exception as err:
+            if not self._can_fall_back(cfg, device, err):
+                raise
+            gpu_note = self._gpu_failed(err)
+            device = "cpu"
+            model = self._load(cfg, device)
 
         # preset decoding: temperatura predefinita di faster-whisper (parte da 0 e sale solo se un
         # pezzo viene male). Una temperatura fissa > 0 sceglierebbe le parole a caso ignorando beam_size
@@ -704,53 +811,66 @@ class WhisperGUI(tk.Tk):
 
         files = cfg["files"]
         total_files = len(files)
-        skipped = []
+        done, failed, missing = [], [], []
 
         for idx, path in enumerate(files, start=1):
             if self.stop_requested.is_set():
                 break
+            name = os.path.basename(path)
             if not os.path.isfile(path):
-                skipped.append(os.path.basename(path))
+                missing.append(name)
                 continue
 
-            name = os.path.basename(path)
-            self._post("_set_status", f"Elaborazione ({idx}/{total_files}): {name}")
+            self._post("_begin_file", f"Elaborazione ({idx}/{total_files}): {name}")
             try:
                 segments = self._transcribe(model, path, cfg, decode)
             except Exception as err:
-                if not (cfg["device"] == "auto" and device == "cuda" and is_cuda_error(err)):
-                    raise RuntimeError(f"Errore durante la trascrizione di «{name}»:\n{err}") from err
+                if self.stop_requested.is_set():
+                    break
+                if not self._can_fall_back(cfg, device, err):
+                    failed.append((name, describe(err)))
+                    continue
                 # la GPU c'e' ma non funziona: si riparte con un modello nuovo sulla CPU
-                self._post("_set_status", f"La GPU non risponde, passo alla CPU: {name}")
+                gpu_note = self._gpu_failed(err)
+                self._post("_begin_file", f"La GPU non risponde, passo alla CPU: {name}")
                 device = "cpu"
                 model = self._load(cfg, device)
                 try:
                     segments = self._transcribe(model, path, cfg, decode)
                 except Exception as err2:
-                    raise RuntimeError(f"Errore durante la trascrizione di «{name}»:\n{err2}") from err2
+                    if self.stop_requested.is_set():
+                        break
+                    failed.append((name, describe(err2)))
+                    continue
 
             if segments is None:  # interrotto dall'utente
                 break
 
-            write_outputs(path, segments, cfg)
-            self.output_dir = os.path.dirname(path)
-            self._post("_file_done", idx, total_files)
+            try:
+                write_outputs(path, segments, cfg)
+            except OSError as err:
+                failed.append((name, f"impossibile salvare i file di output: {describe(err)}"))
+                continue
+            done.append(name)
+            self._post("_file_done", idx, total_files, os.path.dirname(path))
 
         if self.stop_requested.is_set():
             self._post("_finish_cancelled")
-        elif skipped:
-            self._post("_finish_with_error", "Questi file non sono stati trovati e sono stati saltati:\n" + "\n".join(skipped))
         else:
-            self._post("_finish_ok", "Tutti i file sono stati elaborati con successo.")
+            self._post("_finish_summary", done, failed, missing, gpu_note)
 
     def _load(self, cfg, device):
         model_name = cfg["model_name"]
         compute_type = compute_type_for(device, cfg["compute_type"])
-        self._post("_set_status", f"Caricamento modello '{model_name}' in memoria... (al primo utilizzo viene scaricato)")
+        self._post("_set_status", f"Caricamento modello '{model_name}' in memoria...")
+
+        def on_download():
+            self._post("_set_status", f"Download del modello '{model_name}' da Internet (solo la prima volta)...")
+
         try:
-            model = self._load_model_fn(model_name, device, compute_type)
+            model = self._load_model_fn(model_name, device, compute_type, on_download=on_download)
         except Exception as err:
-            raise RuntimeError(f"Errore caricamento modello '{model_name}':\n{err}") from err
+            raise RuntimeError(f"Errore caricamento modello '{model_name}':\n{describe(err)}") from err
         inner = getattr(model, "model", None)
         used = "GPU NVIDIA (CUDA)" if getattr(inner, "device", device) == "cuda" else "CPU"
         precision = getattr(inner, "compute_type", compute_type)
@@ -779,6 +899,27 @@ class WhisperGUI(tk.Tk):
         if self.stop_requested.is_set():
             return None
         return segments_out
+
+    def _finish_summary(self, done, failed, missing, gpu_note):
+        note = f"\n\nNota: {gpu_note}" if gpu_note else ""
+        if not failed and not missing:
+            self._finish_ok("Tutti i file sono stati elaborati con successo." + note)
+            return
+        parts = []
+        if failed:
+            parts.append("Non è stato possibile elaborare:\n" + "\n".join(f"• {n}: {why}" for n, why in failed))
+        if missing:
+            parts.append("File non trovati (saltati):\n" + "\n".join(f"• {n}" for n in missing))
+        details = "\n\n".join(parts) + note
+        if not done:
+            self._finish_with_error(details)
+            return
+        # una parte e' andata a buon fine: i file completati sono salvati
+        self.set_ui_running(False)
+        self.progress.config(value=100)
+        self.lbl_status.config(text="⚠ Completato con problemi.", foreground=self.COL_ERROR)
+        messagebox.showwarning("Whisper Studio", f"Completati {len(done)} file su "
+                                                 f"{len(done) + len(failed) + len(missing)}.\n\n{details}")
 
     def _finish_ok(self, msg: str):
         self.set_ui_running(False)
