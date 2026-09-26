@@ -324,3 +324,9 @@ def test_temporary_file_never_touches_a_user_file_with_the_same_name(tmp_path):
     ws.write_outputs(str(media), segs, cfg)
     assert mine.read_text(encoding="utf-8") == "mio"
     assert (tmp_path / "a.srt").exists()
+
+
+def test_download_can_be_cancelled(fake_whisper):
+    with pytest.raises(ws.DownloadCancelled):
+        ws.load_model("medium", "cpu", "auto", on_download=lambda d, t: None, should_stop=lambda: True)
+    assert fake_whisper.calls == [("medium", True)]  # il modello non viene aperto

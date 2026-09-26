@@ -18,7 +18,7 @@ Vuoi usare l'applicazione subito senza installare Python?
 
 Note:
 * **FFmpeg non serve**: l'audio dei file viene letto direttamente dal programma.
-* **Primo utilizzo di un modello**: viene scaricato da Internet una sola volta (tiny ≈ 75 MB, small ≈ 480 MB, medium ≈ 1,5 GB, large-v3 ≈ 3 GB). Durante il download la finestra mostra la percentuale e i MB scaricati; da quel momento funziona anche offline.
+* **Primo utilizzo di un modello**: viene scaricato da Internet una sola volta (tiny ≈ 75 MB, small ≈ 480 MB, medium ≈ 1,5 GB, turbo ≈ 1,6 GB, large-v3 ≈ 3 GB). Durante il download la finestra mostra la percentuale e i MB scaricati, e «Interrompi» lo ferma (la volta dopo riparte da capo); da quel momento funziona anche offline.
 * Windows può mostrare l'avviso di SmartScreen perché l'eseguibile non è firmato: *Ulteriori informazioni → Esegui comunque*.
 
 ### ⚡ GPU NVIDIA (facoltativa)
@@ -36,7 +36,7 @@ Le schede RTX serie 50 richiedono cuBLAS 12.8 o successivo. Se la GPU dà errore
 * **Supporto Multimediale:** Compatibile con file video (`.mp4`, `.mkv`, `.mov`, `.avi`) e audio (`.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`).
 * **Batch Processing:** Carica più file contemporaneamente e lasciali elaborare in coda in modo completamente automatico. Se un file non si può leggere, gli altri vengono elaborati comunque e alla fine un riepilogo dice cosa non è andato.
 * **Formati di Output Multipli:** Scegli tra `.txt` (Testo semplice), `.srt` (Sottotitoli standard), `.vtt` (Sottotitoli Web) e `.segments.txt` (Testo con timestamp). I file vengono salvati accanto all'originale, con lo stesso nome; se esistono già, il programma chiede prima di sovrascriverli. File con lo stesso nome (es. `lezione.mp4` e `lezione.m4a`) vengono segnalati prima di iniziare, perché uno cancellerebbe la trascrizione dell'altro.
-* **Modelli Flessibili:** Scegli la "taglia" del modello AI in base alle tue esigenze (es. `tiny` per la massima velocità, `large-v3` per la massima precisione).
+* **Modelli Flessibili:** Scegli la "taglia" del modello AI in base alle tue esigenze (es. `tiny` per la massima velocità, `large-v3` per la massima precisione). `turbo` ha quasi la precisione di `large-v3` ed è molto più veloce, ideale con la GPU; non sa tradurre, quindi con «Traduci» il programma chiede di scegliere un altro modello.
 * **Velocità vs Qualità:** `Fast`, `Balanced` e `Accurate` cambiano l'ampiezza della ricerca (beam size 1, 3, 5). Le parole non vengono scelte a caso: il campionamento interviene solo come ripiego sui pezzi che vengono male.
 * **Dispositivo:** Automatico, GPU (CUDA) o CPU.
 * **Avanzamento e ETA in tempo reale**, calcolati sul ritmo effettivo della trascrizione.

@@ -403,7 +403,7 @@ def test_model_download_shows_the_percentage(make_app, dialogs, media):
     gate = threading.Event()
     seen = []
 
-    def loader(name, device, compute_type, on_download=None):
+    def loader(name, device, compute_type, on_download=None, should_stop=None):
         on_download(0, 0)
         on_download(50 * 2**20, 200 * 2**20)
         gate.wait(10)
@@ -419,3 +419,53 @@ def test_model_download_shows_the_percentage(make_app, dialogs, media):
     assert "small" in text and "50" in text and "200" in text
     assert mode == "determinate" and value == 25.0
     assert dialogs.kinds() == ["showinfo"]
+
+
+def test_stop_during_model_download_cancels(make_app, dialogs, media):
+    import time
+    import trascrivi_locale as ws
+
+    def loader(name, device, compute_type, on_download=None, should_stop=None):
+        on_download(0, 0)
+        for i in range(400):
+            if should_stop():
+                raise ws.DownloadCancelled()
+            on_download(i, 400)
+            time.sleep(0.02)
+        return FakeModel("cpu", segments=TWO_SEGS, duration=4.0)
+
+    app = make_app(loader)
+    start_with(app, [media])
+    pump_until(app, lambda: "Download" in app.lbl_status.cget("text"), timeout=15)
+    app.btn_stop.invoke()
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert dialogs.kinds() == ["showinfo"]
+    msg = dialogs.calls[0][2].lower()
+    assert "download" in msg and "annullat" in msg and "da capo" in msg
+    assert not os.path.exists(os.path.splitext(media)[0] + ".txt")
+
+
+def model_combobox(app):
+    stack = [app]
+    while stack:
+        w = stack.pop()
+        if w.winfo_class() == "TCombobox" and str(w.cget("textvariable")) == str(app.model_name):
+            return w
+        stack.extend(w.winfo_children())
+
+
+def test_turbo_model_is_offered(make_app):
+    app = make_app(Loader({}))
+    assert "turbo" in model_combobox(app).cget("values")
+
+
+def test_turbo_cannot_translate_and_says_so(make_app, dialogs, media):
+    loader = Loader({"cpu": FakeModel("cpu", segments=TWO_SEGS)})
+    app = make_app(loader)
+    app.model_name.set("turbo")
+    app.task.set("translate")
+    start_with(app, [media])
+    pump_for(app, 0.3)
+    assert dialogs.kinds() == ["showwarning"]
+    assert "turbo" in dialogs.calls[0][2]
+    assert loader.calls == []

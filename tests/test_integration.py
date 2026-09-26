@@ -100,3 +100,31 @@ def test_real_download_reports_progress(tmp_path):
     assert total > 50 * 2**20 and done == total
     assert len(rec) > 3  # percentuali intermedie, non solo inizio e fine
     assert all(a[0] <= b[0] for a, b in zip(rec[1:], rec[2:]))
+
+
+def test_real_download_can_be_cancelled_and_restarted(tmp_path):
+    """Interrompe davvero il download del modello tiny dopo ~10 MB, poi lo riscarica per intero."""
+    import json
+    import sys
+    code = (
+        "import json, sys, time; sys.path.insert(0, %r); import trascrivi_locale as ws; rec = []; out = {}\n"
+        "t0 = time.time()\n"
+        "try:\n"
+        "    ws.load_model('tiny', 'cpu', 'auto', on_download=lambda d, t: rec.append(d),\n"
+        "                  should_stop=lambda: bool(rec) and rec[-1] > 10 * 2**20)\n"
+        "    out['annullato'] = False\n"
+        "except ws.DownloadCancelled:\n"
+        "    out['annullato'] = True\n"
+        "out['secondi'] = time.time() - t0\n"
+        "ws.load_model('tiny', 'cpu', 'auto')\n"
+        "out['riscaricato'] = True\n"
+        "print(json.dumps(out))" % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    env = dict(os.environ, HF_HUB_CACHE=str(tmp_path / "cache"), HF_HUB_DISABLE_SYMLINKS_WARNING="1")
+    env.pop("HF_HUB_DISABLE_XET", None)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=600)
+    assert r.returncode == 0, r.stderr[-2000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["annullato"] is True
+    assert out["secondi"] < 60
+    assert out["riscaricato"] is True

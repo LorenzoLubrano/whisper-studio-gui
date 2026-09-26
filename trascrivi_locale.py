@@ -14,6 +14,9 @@ from tkinter import ttk
 # ne' un eventuale token Hugging Face salvato sul PC (i modelli usati sono pubblici)
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+# Download dei modelli via HTTP invece che Xet: solo cosi' "Interrompi" puo' fermarlo
+# (il downloader Xet ignora le eccezioni del contatore di avanzamento e va avanti fino alla fine)
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 # =======================
 #   UTILS
@@ -222,7 +225,10 @@ def compute_type_for(device: str, requested: str) -> str:
 # gli stessi file che scarica faster-whisper per un modello
 MODEL_FILES = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]
 
-def _download_progress_tqdm(report, known_total=0):
+class DownloadCancelled(Exception):
+    """Download del modello interrotto dall'utente."""
+
+def _download_progress_tqdm(report, known_total=0, should_stop=None):
     """Classe tqdm per snapshot_download: nessun output su console, byte scaricati a report(fatti, totali).
 
     huggingface_hub crea due barre in byte: "Downloading bytes" (dalla rete) e "Reconstructing ..."
@@ -245,6 +251,9 @@ def _download_progress_tqdm(report, known_total=0):
 
         def update(self, n=1):
             out = super().update(n)
+            if should_stop and should_stop():
+                # interrompe il download in corso (il file parziale viene scartato)
+                raise DownloadCancelled("download annullato")
             if self.unit == "B":
                 total = known_total or max(int(b.total or 0) for b in byte_bars)
                 done = min(max(int(b.n) for b in byte_bars), total)
@@ -269,7 +278,7 @@ def _download_size(repo_id: str) -> int:
     except Exception:
         return 0
 
-def download_model_with_progress(name: str, report) -> str:
+def download_model_with_progress(name: str, report, should_stop=None) -> str:
     import huggingface_hub
     try:
         from faster_whisper.utils import _MODELS
@@ -277,14 +286,14 @@ def download_model_with_progress(name: str, report) -> str:
     except (ImportError, KeyError):
         repo_id = f"Systran/faster-whisper-{name}"
     total = _download_size(repo_id)
-    tqdm_class = _download_progress_tqdm(report, total)
+    tqdm_class = _download_progress_tqdm(report, total, should_stop)
     path = huggingface_hub.snapshot_download(repo_id, allow_patterns=MODEL_FILES, tqdm_class=tqdm_class)
     final = total or max((int(b.total or 0) for b in tqdm_class.byte_bars), default=0)
     if final:
         report(final, final)
     return path
 
-def load_model(name: str, device: str, compute_type: str, on_download=None):
+def load_model(name: str, device: str, compute_type: str, on_download=None, should_stop=None):
     from faster_whisper import WhisperModel
     from huggingface_hub.utils import LocalEntryNotFoundError
     try:
@@ -293,7 +302,7 @@ def load_model(name: str, device: str, compute_type: str, on_download=None):
     except LocalEntryNotFoundError:
         report = on_download or (lambda done, total: None)
         report(0, 0)  # download iniziato, dimensione non ancora nota
-        path = download_model_with_progress(name, report)
+        path = download_model_with_progress(name, report, should_stop)
         return WhisperModel(path, device=device, compute_type=compute_type)
 
 # =======================
@@ -527,7 +536,7 @@ class WhisperGUI(tk.Tk):
 
         # Model
         ttk.Label(opt_card, text="Modello", style="Muted.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 2))
-        cb_model = ttk.Combobox(opt_card, textvariable=self.model_name, state="readonly", values=["tiny", "base", "small", "medium", "large-v3"])
+        cb_model = ttk.Combobox(opt_card, textvariable=self.model_name, state="readonly", values=["tiny", "base", "small", "medium", "large-v3", "turbo"])
         cb_model.grid(row=1, column=0, sticky="ew", pady=(0, 12), padx=(0, 5))
 
         # Compute Type
@@ -796,6 +805,14 @@ class WhisperGUI(tk.Tk):
             "save_txt_seg": self.save_txt_seg.get(),
         }
 
+        if cfg["model_name"] == "turbo" and cfg["task"] == "translate":
+            # verificato: con "translate" turbo restituisce il testo nella lingua originale
+            messagebox.showwarning(
+                "Traduzione non disponibile",
+                "Il modello turbo non sa tradurre: restituirebbe il testo nella lingua originale.\n\n"
+                "Per «Traduci» scegli medium o large-v3; turbo va benissimo per «Trascrivi».")
+            return
+
         if not output_paths("x", cfg):
             messagebox.showwarning("Nessun formato", "Scegli almeno un formato di output da salvare.")
             return
@@ -859,6 +876,9 @@ class WhisperGUI(tk.Tk):
         ended = False
         try:
             self._process(cfg)
+            ended = True
+        except DownloadCancelled:
+            self._post("_finish_download_cancelled", cfg["model_name"])
             ended = True
         except Exception as err:
             # il messaggio viene calcolato qui: `err` non esiste piu' fuori da questo blocco
@@ -943,6 +963,8 @@ class WhisperGUI(tk.Tk):
                 try:
                     model = self._load(cfg, device)
                 except Exception as load_err:
+                    if self.stop_requested.is_set():
+                        break
                     failed.extend((os.path.basename(p), describe(load_err)) for p in files[idx - 1:])
                     break
                 try:
@@ -978,7 +1000,10 @@ class WhisperGUI(tk.Tk):
             self._post("_download_progress", model_name, done, total)
 
         try:
-            model = self._load_model_fn(model_name, device, compute_type, on_download=on_download)
+            model = self._load_model_fn(model_name, device, compute_type, on_download=on_download,
+                                        should_stop=self.stop_requested.is_set)
+        except DownloadCancelled:
+            raise
         except Exception as err:
             raise RuntimeError(f"Errore caricamento modello '{model_name}':\n{describe(err)}") from err
         inner = getattr(model, "model", None)
@@ -1050,6 +1075,13 @@ class WhisperGUI(tk.Tk):
         messagebox.showinfo("Whisper Studio", f"Operazione annullata dopo {len(done)} file completati. "
                                               "Il file in corso non è stato salvato; quelli già completati restano."
                                               + (f"\n\n{details}" if details else ""))
+
+    def _finish_download_cancelled(self, model_name):
+        self.set_ui_running(False)
+        self.progress.config(value=0)
+        self.lbl_status.config(text="⏹ Download annullato.", foreground=self.COL_TEXT_MAIN)
+        messagebox.showinfo("Whisper Studio", f"Download del modello '{model_name}' annullato: nessun file è stato "
+                                              "elaborato.\n\nAl prossimo avvio il download ripartirà da capo.")
 
     def _finish_with_error(self, msg: str):
         self.set_ui_running(False)

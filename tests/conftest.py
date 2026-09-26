@@ -64,7 +64,7 @@ class Loader:
         self.by_device = by_device
         self.calls = []
 
-    def __call__(self, name, device, compute_type, on_download=None):
+    def __call__(self, name, device, compute_type, on_download=None, should_stop=None):
         self.calls.append((name, device, compute_type))
         model = self.by_device[device]
         if isinstance(model, BaseException):
