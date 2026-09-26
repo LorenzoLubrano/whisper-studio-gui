@@ -235,3 +235,28 @@ def test_missing_model_is_downloaded_and_the_user_is_told(fake_whisper):
     ws.load_model("medium", "cpu", "auto", on_download=lambda: downloads.append(1))
     assert fake_whisper.calls == [("medium", True), ("medium", False)]
     assert downloads == [1]
+
+
+@needs_windows
+def test_cuda_status_tries_the_next_cublas_if_one_does_not_load(no_cuda_env, monkeypatch):
+    import ctranslate2
+    first = fake_dll(no_cuda_env / "programma")          # es. copiata senza cublasLt accanto
+    second = fake_dll(no_cuda_env / "CUDA" / "v12.9" / "bin")
+    monkeypatch.setenv("CUDA_PATH_V12_9", str(no_cuda_env / "CUDA" / "v12.9"))
+    monkeypatch.setattr(ctranslate2, "get_cuda_device_count", lambda: 1)
+    tried = []
+    monkeypatch.setattr(ws, "_load_cublas", lambda p: tried.append(p) or p == second)
+    assert ws.cuda_status()[0] == "cuda"
+    assert tried == [first, second]
+
+
+def test_temporary_file_never_touches_a_user_file_with_the_same_name(tmp_path):
+    media = tmp_path / "a.mp3"
+    media.write_bytes(b"")
+    mine = tmp_path / "a.srt.tmp"
+    mine.write_text("mio", encoding="utf-8")
+    segs = [{"start": 0.0, "end": 1.0, "text": "ok"}]
+    cfg = {"save_txt": False, "save_srt": True, "save_vtt": False, "save_txt_seg": False}
+    ws.write_outputs(str(media), segs, cfg)
+    assert mine.read_text(encoding="utf-8") == "mio"
+    assert (tmp_path / "a.srt").exists()

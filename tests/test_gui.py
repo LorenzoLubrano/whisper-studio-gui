@@ -315,3 +315,85 @@ def test_language_code_is_normalised(make_app, dialogs, media):
     start_with(app, [media])
     pump_until(app, lambda: is_idle(app), timeout=15)
     assert model.calls[0][1]["language"] == "it"
+
+
+def test_explicit_gpu_failure_does_not_reuse_the_broken_gpu(make_app, dialogs, tmp_path):
+    files = [make_media(tmp_path, n) for n in ("uno.mp3", "due.mp3")]
+    gpu = FakeModel("cuda", error=CUBLAS_MISSING)
+    loader = Loader({"cuda": gpu, "cpu": FakeModel("cpu", segments=TWO_SEGS)})
+    app = make_app(loader, probe=("cuda", "GPU NVIDIA (CUDA)"))
+    app.device_choice.set("GPU (CUDA)")
+    start_with(app, files)
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert [c[0] for c in gpu.calls] == [files[0]]  # il secondo file non tocca piu' la GPU guasta
+    assert dialogs.kinds() == ["showerror"]
+    msg = dialogs.calls[0][2]
+    assert "uno.mp3" in msg and "due.mp3" in msg and "riavvia" in msg.lower()
+    app.btn_start.invoke()
+    pump_until(app, lambda: is_idle(app) and len(dialogs.calls) == 2, timeout=15)
+    assert "riavvia" in dialogs.calls[1][2].lower()
+    assert [c[1] for c in loader.calls] == ["cuda"]
+
+
+def test_auto_gpu_error_without_cuda_words_still_falls_back(make_app, dialogs, media):
+    gpu = FakeModel("cuda", error=RuntimeError("std::bad_alloc"))
+    loader = Loader({"cuda": gpu, "cpu": FakeModel("cpu", segments=TWO_SEGS, duration=4.0)})
+    app = make_app(loader, probe=("cuda", "GPU NVIDIA (CUDA)"))
+    start_with(app, [media])
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert [c[1] for c in loader.calls] == ["cuda", "cpu"]
+    assert dialogs.kinds() == ["showinfo"] and "CPU" in dialogs.calls[0][2]
+
+
+def test_broken_file_on_gpu_is_not_a_gpu_failure(make_app, dialogs, tmp_path):
+    import av
+    files = [make_media(tmp_path, n) for n in ("a.mp3", "b.mp3", "c.mp3")]
+    broken = av.error.InvalidDataError(1094995529, "Invalid data found when processing input", files[1])
+    gpu = FakeModel("cuda", segments=TWO_SEGS, duration=4.0, error_for={"b.mp3": broken})
+    loader = Loader({"cuda": gpu, "cpu": FakeModel("cpu", segments=TWO_SEGS)})
+    app = make_app(loader, probe=("cuda", "GPU NVIDIA (CUDA)"))
+    start_with(app, files)
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert [c[1] for c in loader.calls] == ["cuda"]
+    assert (tmp_path / "a.txt").exists() and (tmp_path / "c.txt").exists()
+    assert dialogs.kinds() == ["showwarning"] and "b.mp3" in dialogs.calls[0][2]
+
+
+def test_cancel_summary_keeps_earlier_failures(make_app, dialogs, tmp_path):
+    files = [make_media(tmp_path, n) for n in ("rotto.mp3", "lungo.mp3")]
+    gate = threading.Event()
+    model = FakeModel("cpu", segments=TWO_SEGS, duration=4.0, gate=gate, wait_before_error=False,
+                      error_for={"rotto.mp3": ValueError("Invalid data found when processing input")})
+    app = make_app(Loader({"cpu": model}))
+    start_with(app, files)
+    pump_until(app, lambda: len(model.calls) == 2, timeout=15)
+    app.btn_stop.invoke()
+    gate.set()
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert dialogs.kinds() == ["showinfo"]
+    assert "annullat" in dialogs.calls[0][2].lower() and "rotto.mp3" in dialogs.calls[0][2]
+
+
+def test_cpu_model_failing_after_the_fallback_keeps_the_summary(make_app, dialogs, tmp_path):
+    files = [make_media(tmp_path, n) for n in ("a.mp3", "b.mp3", "c.mp3")]
+    gpu = FakeModel("cuda", segments=TWO_SEGS, duration=4.0, error_for={"b.mp3": CUBLAS_MISSING})
+    loader = Loader({"cuda": gpu, "cpu": OSError("modello CPU non caricabile")})
+    app = make_app(loader, probe=("cuda", "GPU NVIDIA (CUDA)"))
+    start_with(app, files)
+    pump_until(app, lambda: is_idle(app), timeout=15)
+    assert (tmp_path / "a.txt").exists()
+    assert dialogs.kinds() == ["showwarning"]
+    msg = dialogs.calls[0][2]
+    assert "b.mp3" in msg and "c.mp3" in msg and "modello CPU non caricabile" in msg
+
+
+def test_closing_while_running_stops_the_progress_animation(make_app, dialogs, media):
+    gate = threading.Event()
+    model = FakeModel("cpu", segments=TWO_SEGS, duration=0.0, gate=gate)  # durata 0: barra animata
+    app = make_app(Loader({"cpu": model}))
+    start_with(app, [media])
+    pump_until(app, lambda: model.calls, timeout=15)
+    app._on_close()
+    gate.set()
+    scripts = [str(app.tk.call("after", "info", i)) for i in app.tk.call("after", "info")]
+    assert not any("progressbar" in s.lower() for s in scripts)

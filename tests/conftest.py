@@ -29,13 +29,15 @@ def make_info(duration):
 class FakeModel:
     """Sostituto di WhisperModel: stessa interfaccia usata dall'app (transcribe + model.device)."""
 
-    def __init__(self, device, segments=(), duration=10.0, error=None, gate=None, error_for=None):
+    def __init__(self, device, segments=(), duration=10.0, error=None, gate=None, error_for=None,
+                 wait_before_error=True):
         self.model = types.SimpleNamespace(device=device, compute_type="float32")
         self._segments = list(segments)
         self._duration = duration
         self._error = error
         self._error_for = error_for or {}  # {nome file: eccezione}: fallisce solo su quei file
         self._gate = gate  # threading.Event: se c'e', si ferma (prima dell'errore o dopo il 1o segmento) finche' non viene impostato
+        self._wait_before_error = wait_before_error
         self.calls = []
 
     def transcribe(self, path, **kwargs):
@@ -44,7 +46,7 @@ class FakeModel:
 
         def gen():
             if error is not None:
-                if self._gate is not None:
+                if self._gate is not None and self._wait_before_error:
                     self._gate.wait(10)
                 raise error
             for i, seg in enumerate(self._segments):

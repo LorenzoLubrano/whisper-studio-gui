@@ -3,6 +3,7 @@ import re
 import sys
 import time
 import queue
+import tempfile
 import threading
 import subprocess
 import tkinter as tk
@@ -82,9 +83,10 @@ def write_outputs(media_path: str, segments: list, cfg: dict) -> list:
             writer = write_srt
         else:
             writer = write_vtt
-        # prima su un file temporaneo, poi sostituzione in un colpo solo:
-        # un errore o una chiusura a meta' non lasciano un file troncato
-        tmp = p + ".tmp"
+        # prima su un file temporaneo (nome unico, mai un file dell'utente), poi sostituzione
+        # in un colpo solo: un errore o una chiusura a meta' non lasciano un file troncato
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p) or ".", prefix=os.path.basename(p) + ".", suffix=".tmp")
+        os.close(fd)
         try:
             writer(segments, tmp)
             os.replace(tmp, p)
@@ -138,13 +140,18 @@ def cuda_library_dirs() -> list:
             found.append(d)
     return found
 
-def find_cublas():
-    """Percorso completo di cublas64_12.dll nelle cartelle note, oppure None."""
+def cublas_candidates() -> list:
+    """Percorsi completi di cublas64_12.dll nelle cartelle note, in ordine di preferenza."""
+    paths = []
     for d in cuda_library_dirs():
         path = os.path.join(d, CUBLAS_DLL)
         if os.path.isfile(path):
-            return path
-    return None
+            paths.append(path)
+    return paths
+
+def find_cublas():
+    candidates = cublas_candidates()
+    return candidates[0] if candidates else None
 
 def _load_cublas(path: str) -> bool:
     global _cublas_module
@@ -172,10 +179,11 @@ def cuda_status():
             return "cuda", "GPU NVIDIA (CUDA)"
         except OSError:
             return "cpu", "CPU (GPU NVIDIA trovata, ma mancano le librerie CUDA 12 cuBLAS)"
-    path = find_cublas()
-    if path is None or not _load_cublas(path):
-        return "cpu", "CPU (GPU NVIDIA trovata, ma mancano le librerie CUDA 12 cuBLAS)"
-    return "cuda", "GPU NVIDIA (CUDA)"
+    # si prova la successiva se una copia non si carica (es. cublasLt64_12.dll dimenticata accanto)
+    for path in cublas_candidates():
+        if _load_cublas(path):
+            return "cuda", "GPU NVIDIA (CUDA)"
+    return "cpu", "CPU (GPU NVIDIA trovata, ma mancano le librerie CUDA 12 cuBLAS)"
 
 def resolve_device(requested: str, probe=cuda_status) -> str:
     if requested == "cpu":
@@ -191,6 +199,16 @@ _CUDA_ERROR = re.compile(r"\bcu(?:da|blas|dnn)", re.IGNORECASE)
 def is_cuda_error(err: BaseException) -> bool:
     # \b: "barracuda.mp3" in un messaggio non e' un errore della GPU
     return bool(_CUDA_ERROR.search(str(err)))
+
+def is_media_error(err: BaseException) -> bool:
+    """Errore nel leggere il file (mancante, illeggibile, non multimediale), non della GPU."""
+    try:
+        import av
+        if isinstance(err, av.error.FFmpegError):
+            return True
+    except Exception:
+        pass
+    return isinstance(err, OSError)
 
 def describe(err: BaseException) -> str:
     return str(err) or type(err).__name__
@@ -576,9 +594,10 @@ class WhisperGUI(tk.Tk):
             self._poll_id = self.after(100, self._poll_events)
 
     def destroy(self):
-        # senza questo il controllo periodico resterebbe programmato dopo la chiusura
+        # senza questo il controllo periodico e l'animazione della barra resterebbero programmati
         try:
             self.after_cancel(self._poll_id)
+            self.progress.stop()
         except (AttributeError, tk.TclError):
             pass
         super().destroy()
@@ -772,13 +791,15 @@ class WhisperGUI(tk.Tk):
             if not ended:  # anche un'uscita anomala del thread deve sbloccare la finestra
                 self._post("_finish_with_error", "L'elaborazione si è interrotta in modo imprevisto.")
 
-    def _can_fall_back(self, cfg, device, err) -> bool:
-        return cfg["device"] == "auto" and device == "cuda" and is_cuda_error(err)
-
     def _gpu_failed(self, err) -> str:
+        # da qui in poi la GPU non si usa piu' in questa sessione: riusarla puo' bloccarsi
         self._cuda_failed = describe(err).splitlines()[-1]
         self._post("_set_accel_label", "Acceleratore: CPU (la GPU ha dato errore: si riprova al prossimo avvio)")
         return f"la GPU ha dato errore ({self._cuda_failed}): il lavoro è stato fatto sulla CPU."
+
+    def _gpu_restart_hint(self) -> str:
+        return (f"la GPU ha dato errore ({self._cuda_failed}). Chiudi e riavvia Whisper Studio per "
+                "riprovarla, oppure scegli «Automatico» o «CPU» in Dispositivo.")
 
     def _process(self, cfg):
         gpu_note = None
@@ -793,9 +814,11 @@ class WhisperGUI(tk.Tk):
         try:
             model = self._load(cfg, device)
         except Exception as err:
-            if not self._can_fall_back(cfg, device, err):
+            if not (device == "cuda" and is_cuda_error(err)):
                 raise
             gpu_note = self._gpu_failed(err)
+            if cfg["device"] != "auto":
+                raise RuntimeError(f"Errore caricamento modello sulla GPU:\n{self._gpu_restart_hint()}") from err
             device = "cpu"
             model = self._load(cfg, device)
 
@@ -827,14 +850,24 @@ class WhisperGUI(tk.Tk):
             except Exception as err:
                 if self.stop_requested.is_set():
                     break
-                if not self._can_fall_back(cfg, device, err):
+                # sulla GPU tutto cio' che non e' un errore di lettura del file e' un guasto della GPU
+                if not (device == "cuda" and (is_cuda_error(err) or not is_media_error(err))):
                     failed.append((name, describe(err)))
                     continue
-                # la GPU c'e' ma non funziona: si riparte con un modello nuovo sulla CPU
                 gpu_note = self._gpu_failed(err)
+                if cfg["device"] != "auto":
+                    # GPU scelta esplicitamente: niente ripiego, e il modello guasto non si riusa
+                    failed.extend((os.path.basename(p), self._gpu_restart_hint()) for p in files[idx - 1:])
+                    gpu_note = None
+                    break
+                # la GPU c'e' ma non funziona: si riparte con un modello nuovo sulla CPU
                 self._post("_begin_file", f"La GPU non risponde, passo alla CPU: {name}")
                 device = "cpu"
-                model = self._load(cfg, device)
+                try:
+                    model = self._load(cfg, device)
+                except Exception as load_err:
+                    failed.extend((os.path.basename(p), describe(load_err)) for p in files[idx - 1:])
+                    break
                 try:
                     segments = self._transcribe(model, path, cfg, decode)
                 except Exception as err2:
@@ -855,7 +888,7 @@ class WhisperGUI(tk.Tk):
             self._post("_file_done", idx, total_files, os.path.dirname(path))
 
         if self.stop_requested.is_set():
-            self._post("_finish_cancelled")
+            self._post("_finish_cancelled", done, failed, missing, gpu_note)
         else:
             self._post("_finish_summary", done, failed, missing, gpu_note)
 
@@ -900,17 +933,22 @@ class WhisperGUI(tk.Tk):
             return None
         return segments_out
 
-    def _finish_summary(self, done, failed, missing, gpu_note):
-        note = f"\n\nNota: {gpu_note}" if gpu_note else ""
-        if not failed and not missing:
-            self._finish_ok("Tutti i file sono stati elaborati con successo." + note)
-            return
+    @staticmethod
+    def _summary_details(failed, missing, gpu_note) -> str:
         parts = []
         if failed:
             parts.append("Non è stato possibile elaborare:\n" + "\n".join(f"• {n}: {why}" for n, why in failed))
         if missing:
             parts.append("File non trovati (saltati):\n" + "\n".join(f"• {n}" for n in missing))
-        details = "\n\n".join(parts) + note
+        if gpu_note:
+            parts.append(f"Nota: {gpu_note}")
+        return "\n\n".join(parts)
+
+    def _finish_summary(self, done, failed, missing, gpu_note):
+        if not failed and not missing:
+            self._finish_ok("Tutti i file sono stati elaborati con successo." + (f"\n\nNota: {gpu_note}" if gpu_note else ""))
+            return
+        details = self._summary_details(failed, missing, gpu_note)
         if not done:
             self._finish_with_error(details)
             return
@@ -927,12 +965,14 @@ class WhisperGUI(tk.Tk):
         self.lbl_status.config(text="✅ Operazione completata.", foreground=self.COL_SUCCESS)
         messagebox.showinfo("Whisper Studio", msg)
 
-    def _finish_cancelled(self):
+    def _finish_cancelled(self, done, failed, missing, gpu_note):
         self.set_ui_running(False)
         self.progress.config(value=0)
         self.lbl_status.config(text="⏹ Operazione annullata.", foreground=self.COL_TEXT_MAIN)
-        messagebox.showinfo("Whisper Studio", "Operazione annullata. Il file in corso non è stato salvato; "
-                                              "quelli già completati restano.")
+        details = self._summary_details(failed, missing, gpu_note)
+        messagebox.showinfo("Whisper Studio", f"Operazione annullata dopo {len(done)} file completati. "
+                                              "Il file in corso non è stato salvato; quelli già completati restano."
+                                              + (f"\n\n{details}" if details else ""))
 
     def _finish_with_error(self, msg: str):
         self.set_ui_running(False)
